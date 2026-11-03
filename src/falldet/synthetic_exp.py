@@ -22,10 +22,10 @@ import pandas as pd
 import torch
 
 from .augment import Augment
-from .baseline import metrics, split_validation
-from .cli import PROCESSED, REPORTS
-from .model import FallModel
+from .baseline import metrics
+from .paths import PROCESSED, REPORTS
 from .rules import keep_falls
+from .runner import FallData, Fold, Results, Trained, lodo_folds
 
 COLS = ["sensitivity", "false_alarms_per_h", "auroc", "ap", "fa_h_at_95sens_oracle"]
 LOWER = {"false_alarms_per_h", "fa_h_at_95sens_oracle"}
@@ -34,61 +34,58 @@ CONDITIONS = ["real", "mix-25", "mix-100", "mix-adl", "mix-fall", "synth-only", 
 REFERENCE = {c: ("real-noaug" if c.endswith("noaug") else "real") for c in CONDITIONS}
 
 
-def train(cond: str, seed: int, xr, yr, tr, va, xs, ys, aug, channels: str) -> FallModel:
-    """Train one model for ``cond``; ``tr``/``va`` index the real arrays ``xr``/``yr``."""
-    rng = np.random.default_rng(seed + 500)
+def train(cond: str, fold: Fold, xs, ys, aug, channels: str) -> Trained:
+    """Train one model for ``cond`` on ``fold``; ``xs``/``ys`` are the synthetic windows and labels."""
+    rng = np.random.default_rng(fold.seed + 500)  # the mix-25 subset depends on the seed only
     a = None if cond.endswith("noaug") else aug
     if cond == "synth-only":
-        return FallModel.train(xs, ys, xr[va], yr[va], channels=channels, seed=seed, augment=a)
+        return fold.train_model(channels, augment=a, extra=(xs, ys), own_windows=False)
     if cond == "pretrain-ft":
-        base = FallModel.train(xs, ys, xr[va], yr[va], channels=channels, seed=seed, augment=a)
-        return base.continue_training(xr[tr], yr[tr], xr[va], yr[va], seed=seed, freeze_features=False,
-                                      lr=1e-3, batch=256, max_epochs=40, patience=6, augment=a)
-    x, y = xr[tr], yr[tr]
-    if cond.startswith("mix"):
-        keep = np.ones(len(xs), bool)
-        if cond == "mix-25":
-            keep = rng.random(len(xs)) < 0.25
-        elif cond == "mix-adl":
-            keep = ys == 0
-        elif cond == "mix-fall":
-            keep = ys == 1
-        x, y = np.concatenate([x, xs[keep]]), np.concatenate([y, ys[keep]])
-    return FallModel.train(x, y, xr[va], yr[va], channels=channels, seed=seed, augment=a)
+        base = fold.train_model(channels, augment=a, extra=(xs, ys), own_windows=False).model
+        d = fold.data
+        xv, yv = d.windows(fold.validation, channels), d.y[fold.validation]
+        model = base.continue_training(d.windows(fold.train, channels), d.y[fold.train], xv, yv, seed=fold.seed,
+                                       freeze_features=False, lr=1e-3, batch=256, max_epochs=40, patience=6, augment=a)
+        return Trained(model, keep_falls(model.scores(xv), yv))
+    if not cond.startswith("mix"):
+        return fold.train_model(channels, augment=a)
+    keep = np.ones(len(xs), bool)
+    if cond == "mix-25":
+        keep = rng.random(len(xs)) < 0.25
+    elif cond == "mix-adl":
+        keep = ys == 0
+    elif cond == "mix-fall":
+        keep = ys == 1
+    return fold.train_model(channels, augment=a, extra=(xs[keep], ys[keep]))
+
+
+def evaluate(cond: str, fold: Fold, xs, ys, aug, channels: str) -> dict:
+    """Metrics on the fold's held-out dataset of the model trained for ``cond``."""
+    trained = train(cond, fold, xs, ys, aug, channels)
+    p = trained.model.scores(fold.data.windows(fold.test, channels))
+    y = fold.data.y[fold.test]
+    row = metrics(y, (p >= trained.threshold).astype(int), p)
+    del trained
+    torch.cuda.empty_cache()
+    return row
 
 
 def run(seeds: int = 8, channels: str = "acc") -> None:
     t0 = time.time()
-    X = np.load(PROCESSED / "X.npy")
-    meta = pd.read_csv(PROCESSED / "meta.csv")
-    y = meta.label.to_numpy().astype(np.int64)
-    xr = X
+    data = FallData.load()
     xs = np.load(PROCESSED / "synthetic_X.npy")
     ys = pd.read_csv(PROCESSED / "synthetic_meta.csv").label.to_numpy().astype(np.int64)
-    datasets = sorted(meta.dataset.unique())
     aug = Augment()
     out = REPORTS / f"synthetic_{channels}"
-    out.mkdir(parents=True, exist_ok=True)
-    prior = out / "metrics.csv"
-    rows = pd.read_csv(prior).to_dict("records") if prior.exists() else []
-    done = {r["cond"] for r in rows}  # resume: conditions finished by an interrupted run are kept
+    results = Results(out / "runs")  # resume: stored (condition, seed, fold) results are kept
     for cond in CONDITIONS:
-        if cond in done:
-            continue
         for seed in range(seeds):
-            for d in datasets:
-                test = np.where(meta.dataset == d)[0]
-                tr, va = split_validation(meta, np.where(meta.dataset != d)[0], seed)
-                net = train(cond, seed, xr, y, tr, va, xs, ys, aug, channels)
-                thr = keep_falls(net.scores(xr[va]), y[va])
-                p = net.scores(xr[test])
-                rows.append({"cond": cond, "seed": seed, "fold": d,
-                             **metrics(y[test], (p >= thr).astype(int), p)})
-                del net
-                torch.cuda.empty_cache()
+            for fold in lodo_folds(data, seed):
+                if not results.has(cond, seed, fold.key):
+                    results.save(cond, seed, fold.key, [evaluate(cond, fold, xs, ys, aug, channels)])
         print(f"[{cond}] done ({time.time() - t0:.0f}s)", flush=True)
-        pd.DataFrame(rows).to_csv(out / "metrics.csv", index=False)
-    write_report(pd.DataFrame(rows), out, seeds, channels, time.time() - t0)
+    df = results.table()
+    write_report(df[df.seed < seeds], out, seeds, channels, time.time() - t0)
     print(f"report: {out / 'report.md'}")
 
 
@@ -96,9 +93,9 @@ def write_report(df: pd.DataFrame, out, seeds: int, channels: str, seconds: floa
     import json
 
     syn = json.loads((PROCESSED / "synthetic_log.json").read_text())
-    per_seed = df.groupby(["cond", "seed"])[COLS].mean()  # macro over held-out datasets
-    mean = per_seed.groupby("cond").mean()
-    std = per_seed.groupby("cond").std()
+    per_seed = df.groupby(["condition", "seed"])[COLS].mean()  # macro over held-out datasets
+    mean = per_seed.groupby("condition").mean()
+    std = per_seed.groupby("condition").std()
     L = ["# Does synthetic data help?\n"]
     L.append(f"Seeds: {seeds}, input: `{channels}`, stage-1 CNN, leave-one-dataset-out over the real datasets, "
              f"runtime {seconds / 60:.1f} min. Synthetic data: LAFAN1 mocap through a numpy virtual wrist IMU "
@@ -128,7 +125,7 @@ def write_report(df: pd.DataFrame, out, seeds: int, channels: str, seconds: floa
     L.append("")
     for metric, title in (("fa_h_at_95sens_oracle", "oracle FA/h at 95% sens"), ("ap", "AUPRC")):
         L.append(f"## Per held-out dataset: {title} (mean over seeds)\n")
-        pv = df.groupby(["cond", "fold"])[metric].mean().unstack()
+        pv = df.groupby(["condition", "fold"])[metric].mean().unstack()
         L.append("| condition | " + " | ".join(pv.columns) + " |")
         L.append("|---|" + "---|" * len(pv.columns))
         for c in CONDITIONS:

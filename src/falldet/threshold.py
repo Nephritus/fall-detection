@@ -27,67 +27,55 @@ import pandas as pd
 import torch
 
 from .augment import Augment
-from .baseline import metrics, split_validation
-from .cli import PROCESSED, REPORTS
+from .baseline import metrics
 from .finetune import split_target
-from .model import FallModel
+from .paths import REPORTS
 from .rules import TARGET_SENSITIVITY, adl_budget, keep_falls, lodo_median, lodo_pooled, lodo_worst
+from .runner import FallData, Fold, Results, lodo_folds
 
 BUDGETS = (10, 25, 50)  # false alarms per hour
 RULES = ["val-slice", "lodo-pooled", "lodo-median", "lodo-worst",
          *[f"adl-budget-{b}" for b in BUDGETS], "falls-pool", "oracle"]
 
 
+def compare_rules(fold: Fold, channels: str, aug=None) -> list[dict]:
+    """Every rule on one held-out dataset (``fold`` from ``lodo_folds``): one row per rule."""
+    data, y = fold.data, fold.data.y
+    ev_idx, pool = split_target(data.meta, fold.name, fold.seed)
+    pool_idx = np.where(data.meta.subject.isin(pool) & (data.meta.dataset == fold.name))[0]
+    trained = fold.train_model(channels, augment=aug)
+    p_ev = trained.model.scores(data.windows(ev_idx, channels))
+    p_pool = trained.model.scores(data.windows(pool_idx, channels))
+    thr = {"val-slice": trained.threshold}
+    del trained
+    torch.cuda.empty_cache()
+    fall_scores = fold.out_of_dataset_fall_scores(channels, augment=aug)
+    thr["lodo-pooled"] = lodo_pooled(fall_scores)
+    thr["lodo-median"] = lodo_median(fall_scores)
+    thr["lodo-worst"] = lodo_worst(fall_scores)
+    adl_pool = p_pool[y[pool_idx] == 0]
+    for b in BUDGETS:
+        thr[f"adl-budget-{b}"] = adl_budget(adl_pool, b)
+    thr["falls-pool"] = keep_falls(p_pool, y[pool_idx])
+    thr["oracle"] = keep_falls(p_ev, y[ev_idx])
+    return [{"rule": rule, "threshold": t, **metrics(y[ev_idx], (p_ev >= t).astype(int), p_ev)}
+            for rule, t in thr.items()]
+
+
 def run(seeds: int = 3, augment: bool = False) -> None:
     t0 = time.time()
-    X = np.load(PROCESSED / "X.npy")
-    meta = pd.read_csv(PROCESSED / "meta.csv")
-    y = meta.label.to_numpy().astype(np.int64)
+    data = FallData.load()
     aug = Augment() if augment else None
-    datasets = sorted(meta.dataset.unique())
-    rows = []
-    for seed in range(seeds):
-        for ds in datasets:
-            ev_idx, pool = split_target(meta, ds, seed)
-            pool_idx = np.where(meta.subject.isin(pool) & (meta.dataset == ds))[0]
-            src_sets = [d for d in datasets if d != ds]
-            src = np.where(meta.dataset != ds)[0]
-            tr, va = split_validation(meta, src, seed)
-            for ch in ("imu", "acc"):
-                net = FallModel.train(X[tr], y[tr], X[va], y[va], channels=ch, seed=seed, augment=aug)
-                p_ev, p_pool = net.scores(X[ev_idx]), net.scores(X[pool_idx])
-                thr = {"val-slice": keep_falls(net.scores(X[va]), y[va])}
-                del net
-                # nested leave-one-dataset-out over the training datasets
-                per_ds_fall_scores = []
-                for s in src_sets:
-                    s_idx = np.where(meta.dataset == s)[0]
-                    inner = np.where(~meta.dataset.isin([ds, s]))[0]
-                    itr, iva = split_validation(meta, inner, seed)
-                    inet = FallModel.train(X[itr], y[itr], X[iva], y[iva], channels=ch, seed=seed, augment=aug)
-                    ps = inet.scores(X[s_idx])
-                    fall = ps[y[s_idx] == 1]
-                    per_ds_fall_scores.append(fall)
-                    del inet
-                    torch.cuda.empty_cache()
-                thr["lodo-pooled"] = lodo_pooled(per_ds_fall_scores)
-                thr["lodo-median"] = lodo_median(per_ds_fall_scores)
-                thr["lodo-worst"] = lodo_worst(per_ds_fall_scores)
-                adl_pool = p_pool[y[pool_idx] == 0]
-                for b in BUDGETS:
-                    thr[f"adl-budget-{b}"] = adl_budget(adl_pool, b)
-                thr["falls-pool"] = keep_falls(p_pool, y[pool_idx])
-                thr["oracle"] = keep_falls(p_ev, y[ev_idx])
-                for rule, t in thr.items():
-                    rows.append({"seed": seed, "dataset": ds, "channels": ch, "rule": rule,
-                                 "threshold": t, **metrics(y[ev_idx], (p_ev >= t).astype(int), p_ev)})
-                torch.cuda.empty_cache()
-            print(f"[seed {seed}] {ds} done ({time.time() - t0:.0f}s)", flush=True)
     out = REPORTS / ("threshold_augmented" if augment else "threshold")
-    out.mkdir(parents=True, exist_ok=True)
-    df = pd.DataFrame(rows)
-    df.to_csv(out / "metrics.csv", index=False)
-    write_report(df, out, seeds, time.time() - t0, aug)
+    results = Results(out / "runs")
+    for seed in range(seeds):
+        for fold in lodo_folds(data, seed):
+            for ch in ("imu", "acc"):
+                if not results.has(ch, seed, fold.key):
+                    results.save(ch, seed, fold.key, compare_rules(fold, ch, aug))
+            print(f"[seed {seed}] {fold.key} done ({time.time() - t0:.0f}s)", flush=True)
+    df = results.table().rename(columns={"condition": "channels", "fold": "dataset"})
+    write_report(df[df.seed < seeds], out, seeds, time.time() - t0, aug)
     print(f"report: {out / 'report.md'}")
 
 

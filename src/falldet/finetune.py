@@ -8,7 +8,6 @@ and a few more (calibration) pick the early-stopping point and the decision thre
 
 from __future__ import annotations
 
-import json
 import time
 
 import numpy as np
@@ -16,10 +15,11 @@ import pandas as pd
 import torch
 
 from .augment import Augment
-from .baseline import metrics, split_validation
-from .cli import PROCESSED, REPORTS
+from .baseline import metrics
 from .model import FallModel
+from .paths import REPORTS
 from .rules import keep_falls
+from .runner import FallData, Fold, Results, lodo_folds
 
 K_VALUES = (1, 2, 4)
 METHODS = ("zero-shot", "recalibrated", "adabn", "head-only", "full", "scratch")
@@ -44,60 +44,60 @@ def split_target(meta: pd.DataFrame, dataset: str, seed: int):
     return eval_idx, pool_fall_first
 
 
+def adapt(fold: Fold, channels: str, aug=None) -> list[dict]:
+    """All methods and k on one held-out dataset (``fold`` from ``lodo_folds``): one row per (k, method)."""
+    data, seed = fold.data, fold.seed
+    meta, y = data.meta, data.y
+    ev_idx, pool = split_target(meta, fold.name, seed)
+    trained = fold.train_model(channels, augment=aug)
+    base = trained.model
+    x = lambda idx: data.windows(idx, channels)  # noqa: E731
+    rows = []
+
+    def record(method, k, net, thr, n_ft=0, n_ft_fall=0):
+        p = net.scores(x(ev_idx))
+        rows.append({"k": k, "method": method, "threshold": thr, "ft_windows": n_ft, "ft_falls": n_ft_fall,
+                     **metrics(y[ev_idx], (p >= thr).astype(int), p)})
+
+    for k in K_VALUES:
+        c = max(1, k // 2)
+        ft_subs, cal_subs = pool[:k], pool[k : k + c]
+        if len(cal_subs) < c:
+            continue
+        ft = np.where(meta.subject.isin(ft_subs))[0]
+        cal = np.where(meta.subject.isin(cal_subs))[0]
+        pool_all = np.where(meta.subject.isin(pool[: k + c]))[0]
+        if y[ft].sum() == 0 or y[cal].sum() == 0:
+            continue
+        n_ft, n_f = len(ft), int(y[ft].sum())
+        record("zero-shot", k, base, trained.threshold)
+        record("recalibrated", k, base, keep_falls(base.scores(x(cal)), y[cal]))
+        ada = base.adapt_batchnorm(x(pool_all))
+        record("adabn", k, ada, keep_falls(ada.scores(x(cal)), y[cal]))
+        for name, freeze in (("head-only", True), ("full", False)):
+            net = base.continue_training(x(ft), y[ft], x(cal), y[cal], seed=seed, freeze_features=freeze, augment=aug)
+            record(name, k, net, keep_falls(net.scores(x(cal)), y[cal]), n_ft, n_f)
+        sc = FallModel.train(x(ft), y[ft], x(cal), y[cal], channels=channels, seed=seed, augment=aug)
+        record("scratch", k, sc, keep_falls(sc.scores(x(cal)), y[cal]), n_ft, n_f)
+    del trained, base
+    torch.cuda.empty_cache()
+    return rows
+
+
 def run(seeds: int = 3, augment: bool = False) -> None:
     t0 = time.time()
-    X = np.load(PROCESSED / "X.npy")
-    meta = pd.read_csv(PROCESSED / "meta.csv")
-    y = meta.label.to_numpy().astype(np.int64)
+    data = FallData.load()
     aug = Augment() if augment else None
-    rows = []
-    for seed in range(seeds):
-        for ds in sorted(meta.dataset.unique()):
-            ev_idx, pool = split_target(meta, ds, seed)
-            src = np.where(meta.dataset != ds)[0]
-            tr, va = split_validation(meta, src, seed)
-            for ch in ("imu", "acc"):
-                base = FallModel.train(X[tr], y[tr], X[va], y[va], channels=ch, seed=seed, augment=aug)
-                thr_src = keep_falls(base.scores(X[va]), y[va])
-
-                def record(method, k, net, thr, n_ft=0, n_ft_fall=0):
-                    p = net.scores(X[ev_idx])
-                    rows.append({
-                        "seed": seed, "dataset": ds, "channels": ch, "k": k, "method": method,
-                        "threshold": thr, "ft_windows": n_ft, "ft_falls": n_ft_fall,
-                        **metrics(y[ev_idx], (p >= thr).astype(int), p),
-                    })
-
-                for k in K_VALUES:
-                    c = max(1, k // 2)
-                    ft_subs, cal_subs = pool[:k], pool[k : k + c]
-                    if len(cal_subs) < c:
-                        continue
-                    ft = np.where(meta.subject.isin(ft_subs))[0]
-                    cal = np.where(meta.subject.isin(cal_subs))[0]
-                    pool_all = np.where(meta.subject.isin(pool[: k + c]))[0]
-                    if y[ft].sum() == 0 or y[cal].sum() == 0:
-                        continue
-                    n_ft, n_f = len(ft), int(y[ft].sum())
-                    record("zero-shot", k, base, thr_src)
-                    thr = keep_falls(base.scores(X[cal]), y[cal])
-                    record("recalibrated", k, base, thr)
-                    ada = base.adapt_batchnorm(X[pool_all])
-                    record("adabn", k, ada, keep_falls(ada.scores(X[cal]), y[cal]))
-                    for name, freeze in (("head-only", True), ("full", False)):
-                        net = base.continue_training(X[ft], y[ft], X[cal], y[cal], seed=seed, freeze_features=freeze,
-                                                     augment=aug)
-                        record(name, k, net, keep_falls(net.scores(X[cal]), y[cal]), n_ft, n_f)
-                    sc = FallModel.train(X[ft], y[ft], X[cal], y[cal], channels=ch, seed=seed, augment=aug)
-                    record("scratch", k, sc, keep_falls(sc.scores(X[cal]), y[cal]), n_ft, n_f)
-                del base
-                torch.cuda.empty_cache()
-            print(f"[seed {seed}] {ds} done ({time.time() - t0:.0f}s)", flush=True)
     out = REPORTS / ("finetune_augmented" if augment else "finetune")
-    out.mkdir(parents=True, exist_ok=True)
-    df = pd.DataFrame(rows)
-    df.to_csv(out / "metrics.csv", index=False)
-    write_report(df, out, seeds, time.time() - t0, aug)
+    results = Results(out / "runs")
+    for seed in range(seeds):
+        for fold in lodo_folds(data, seed):
+            for ch in ("imu", "acc"):
+                if not results.has(ch, seed, fold.key):
+                    results.save(ch, seed, fold.key, adapt(fold, ch, aug))
+            print(f"[seed {seed}] {fold.key} done ({time.time() - t0:.0f}s)", flush=True)
+    df = results.table().rename(columns={"condition": "channels", "fold": "dataset"})
+    write_report(df[df.seed < seeds], out, seeds, time.time() - t0, aug)
     print(f"report: {out / 'report.md'}")
 
 

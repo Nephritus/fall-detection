@@ -1,2 +1,0 @@
-seed,fold,K,cond,threshold,sensitivity,false_alarms_per_h,auroc,ap,fa_h_at_95sens_oracle,fl_events_per_day_at_val_thr,fl_events_per_day_at_95sens
-2,upfall,15000,c24-random-15000,0.8839457631111145,0.861244019138756,2.7207946447851437,0.9989068881544076,0.9791669998737902,16.713452817965884,40.57713474395403,155.9830493415028

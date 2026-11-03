@@ -1,6 +1,6 @@
 # Baseline results
 
-Seeds: 3. Runtime 16.6 min. Values are mean ± std over seeds (and over folds where noted). Sensitivity is at the threshold that gives ≥95% sensitivity on a subject-wise validation slice of the training data; the threshold reference has one fixed operating point. False alarms/h counts false-alarm windows while replaying held-out ADL windows (one stride = 2 s of replay), so overlapping windows of one event count more than once.
+Seeds: 3. Runtime not recorded (results converted from an earlier run). Values are mean ± std over seeds (and over folds where noted). Sensitivity is at the threshold that gives ≥95% sensitivity on a subject-wise validation slice of the training data; the threshold reference has one fixed operating point. False alarms/h counts false-alarm windows while replaying held-out ADL windows (one stride = 2 s of replay), so overlapping windows of one event count more than once.
 
 **Read these numbers as optimistic.** Every fall is a simulated fall (mattress, mostly young volunteers); the published literature reports far worse results on real falls.
 

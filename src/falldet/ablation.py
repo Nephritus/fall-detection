@@ -9,15 +9,13 @@ from __future__ import annotations
 
 import time
 
-import numpy as np
 import pandas as pd
 import torch
 
 from .augment import TRANSFORMS, Augment
-from .baseline import metrics, split_validation
-from .cli import PROCESSED, REPORTS
-from .model import FallModel
-from .rules import keep_falls
+from .baseline import metrics
+from .paths import REPORTS
+from .runner import FallData, Results, lodo_folds
 
 COLS = ["sensitivity", "false_alarms_per_h", "auroc", "ap", "fa_h_at_95sens_oracle"]
 LOWER = {"false_alarms_per_h", "fa_h_at_95sens_oracle"}
@@ -34,29 +32,23 @@ def configs() -> dict[str, Augment | None]:
 
 def run(seeds: int = 5, channels: str = "acc") -> None:
     t0 = time.time()
-    X = np.load(PROCESSED / "X.npy")
-    meta = pd.read_csv(PROCESSED / "meta.csv")
-    y = meta.label.to_numpy().astype(np.int64)
-    datasets = sorted(meta.dataset.unique())
+    data = FallData.load()
     out = REPORTS / f"ablation_{channels}"
-    out.mkdir(parents=True, exist_ok=True)
-    rows = []
+    results = Results(out / "runs")
     for name, aug in configs().items():
         for seed in range(seeds):
-            for d in datasets:
-                test = np.where(meta.dataset == d)[0]
-                train = np.where(meta.dataset != d)[0]
-                tr, va = split_validation(meta, train, seed)
-                net = FallModel.train(X[tr], y[tr], X[va], y[va], channels=channels, seed=seed, augment=aug)
-                thr = keep_falls(net.scores(X[va]), y[va])
-                p = net.scores(X[test])
-                rows.append({"config": name, "seed": seed, "fold": d, **metrics(y[test], (p >= thr).astype(int), p)})
-                del net
+            for fold in lodo_folds(data, seed):
+                if results.has(name, seed, fold.key):
+                    continue
+                trained = fold.train_model(channels, augment=aug)
+                p = trained.model.scores(data.windows(fold.test, channels))
+                y = data.y[fold.test]
+                results.save(name, seed, fold.key, [metrics(y, (p >= trained.threshold).astype(int), p)])
+                del trained
                 torch.cuda.empty_cache()
         print(f"[{name}] done ({time.time() - t0:.0f}s)", flush=True)
-        pd.DataFrame(rows).to_csv(out / "metrics.csv", index=False)  # partial results survive a crash
-    df = pd.DataFrame(rows)
-    write_report(df, out, seeds, channels, time.time() - t0)
+    df = results.table().rename(columns={"condition": "config"})
+    write_report(df[df.seed < seeds], out, seeds, channels, time.time() - t0)
     print(f"report: {out / 'report.md'}")
 
 

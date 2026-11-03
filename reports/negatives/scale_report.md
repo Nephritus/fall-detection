@@ -1,6 +1,6 @@
 # More Capture-24 negatives: dose-response
 
-Seeds: 3 ([0, 1, 2]). Leave-one-fall-dataset-out, accel-only augmented CNN; random Capture-24 windows per training person (about 47,000 windows exist per person; training people: 74, validation people: 18; held-out people P101-P151, never trained on). K=0 and K=1500 are the control and `c24-random` from `reports/negatives/report.md` (same seeds and splits; windows drawn with a different random stream). Cells: macro over the four held-out fall datasets, mean ± std over seeds. Free-living columns use the held-out people. Sensitivity at a budget is threshold-free (see `negatives.py`). Fall windows are simulated.
+Seeds: 3 ([0, 1, 2]). Leave-one-fall-dataset-out, accel-only augmented CNN; random Capture-24 windows per training person (about 47,000 windows exist per person; training people: 74, validation people: 18; held-out people P101-P151, never trained on). K=0 and K=1500 are the control and `c24-random` from `reports/negatives/report.md` (same seeds and splits). Cells: macro over the four held-out fall datasets, mean ± std over seeds. Free-living columns use the held-out people. Sensitivity at a budget is threshold-free (see `negatives.py`). Fall windows are simulated.
 
 ## Macro over held-out fall datasets
 

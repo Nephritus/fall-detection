@@ -33,17 +33,18 @@ import torch
 from .model import FallModel
 from .alarms import REFRACTORY_S, FalseAlarms, per_day_ci, sensitivity_at_budget
 from .augment import Augment
-from .baseline import metrics, split_validation
+from .baseline import metrics
 from .canonical import FS
-from .cli import PROCESSED, REPORTS
+from .paths import REPORTS
 from .freeliving import OUT, SOURCE
-from .rules import keep_falls
+from .runner import FallData, Fold, Results, Trained, lodo_folds
 
 RANDOM_K = 1500  # Capture-24 windows added per training participant
 MINED_FRACTION = 2 / 3
 VAL_K = 800  # random windows per Capture-24 validation participant
 BUDGETS = (10, 25, 50, 100)  # alarm events per day
 CONDITIONS = ("real", "c24-random", "c24-mined")
+RUNS = REPORTS / "negatives" / "runs"  # negatives.run's conditions and the scale conditions c24-random-<K>
 
 
 # --------------------------------------------------------------------------------- windows
@@ -73,61 +74,59 @@ def free_living(scores: list[np.ndarray], fall_scores: np.ndarray, val_thr: floa
     row = {"fl_events_per_day_at_val_thr": fa.per_day(val_thr), "fl_events_per_day_at_95sens": fa.per_day(t95)}
     return row, {"grid": grid, "ev": ev, "falls": fall_scores}
 
+
 # --------------------------------------------------------------------------------- driver
-def evaluate(net, cond, x, y, test_idx, va, val_thr, test_acc):
-    p = net.scores(x[test_idx])
-    lab = metrics(y[test_idx], (p >= val_thr).astype(int), p)
+def evaluate(trained: Trained, fold: Fold, test_acc: list[np.ndarray]) -> tuple[dict, dict]:
+    """Lab metrics on the fold's held-out fall dataset, free-living numbers on the held-out Capture-24 people."""
+    net, thr, y = trained.model, trained.threshold, fold.data.y[fold.test]
+    p = net.scores(fold.data.windows(fold.test, "acc"))
+    lab = metrics(y, (p >= thr).astype(int), p)
     scores = [net.score_signal(a) for a in test_acc]
-    fl, curve = free_living(scores, p[y[test_idx] == 1], val_thr)
-    row = {"cond": cond, "threshold": val_thr, **{k: lab[k] for k in
+    fl, curve = free_living(scores, p[y == 1], thr)
+    row = {"threshold": thr, **{k: lab[k] for k in
            ("sensitivity", "false_alarms_per_h", "auroc", "ap", "fa_h_at_95sens_oracle")}, **fl}
     return row, curve
 
 
 def run(seed: int) -> None:
     t0 = time.time()
-    X = np.load(PROCESSED / "X.npy")
-    meta = pd.read_csv(PROCESSED / "meta.csv")
-    y = meta.label.to_numpy().astype(np.int64)
-    x = X[:, :, :3]
-    aug = Augment()
+    data, results, aug = FallData.load(), Results(RUNS), Augment()
     people = SOURCE.split(seed)
     test_acc = [SOURCE.signal(p) for p in people.held_out]
     print(f"seed {seed}: C24 train {len(people.train)}, val {len(people.validation)}, test {len(people.held_out)} "
           f"participants ({sum(len(a) for a in test_acc) / FS / 3600:.0f} h)", flush=True)
     x_c24_val = SOURCE.windows(people.validation, VAL_K, seed, "validation")
-    rows, curves = [], {}
-    out = REPORTS / "negatives"
-    out.mkdir(parents=True, exist_ok=True)
-    for ds in sorted(meta.dataset.unique()):
-        test = np.where(meta.dataset == ds)[0]
-        tr, va = split_validation(meta, np.where(meta.dataset != ds)[0], seed)
-        xv, yv = x[va], y[va]
-        net = FallModel.train(x[tr], y[tr], xv, yv, channels="acc", seed=seed, augment=aug)
-        thr = keep_falls(net.scores(xv), yv)
-        row, cv = evaluate(net, "real", x, y, test, va, thr, test_acc)
-        rows.append({"seed": seed, "fold": ds, **row})
-        curves.update({f"{ds}|real|{k}": v for k, v in cv.items()})
-        xc_rand = SOURCE.windows(people.train, RANDOM_K, seed, "train", ds)
+    for fold in lodo_folds(data, seed):
+        run_fold(fold, results, people, test_acc, x_c24_val, aug)
+        print(f"[seed {seed}] {fold.name} done ({time.time() - t0:.0f}s)", flush=True)
+
+
+def run_fold(fold: Fold, results: Results, people, test_acc: list[np.ndarray], x_c24_val: np.ndarray, aug) -> None:
+    """The conditions of one fold that are not stored yet. ``c24-mined`` mines with the fold's ``real`` model,
+    retrained (same seed) when ``real`` itself is already stored."""
+    todo = [c for c in CONDITIONS if not results.has(c, fold.seed, fold.key)]
+    real = None
+    if "real" in todo:
+        real = fold.train_model("acc", augment=aug)
+        row, curve = evaluate(real, fold, test_acc)
+        results.save("real", fold.seed, fold.key, [row], curve)
+    added = {}
+    if "c24-random" in todo:
+        added["c24-random"] = SOURCE.windows(people.train, RANDOM_K, fold.seed, "train", fold.name)
+    if "c24-mined" in todo:
+        if real is None:
+            real = fold.train_model("acc", augment=aug)
         n_mined = round(RANDOM_K * MINED_FRACTION)
-        xc_mix = np.concatenate([SOURCE.windows(people.train, RANDOM_K - n_mined, seed, "mined-random", ds),
-                                 mined_windows(net, people.train, n_mined)])
-        del net
-        xvc = np.concatenate([xv, x_c24_val])
-        yvc = np.concatenate([yv, np.zeros(len(x_c24_val), np.int64)])
-        for cond, xc in (("c24-random", xc_rand), ("c24-mined", xc_mix)):
-            xt = np.concatenate([x[tr], xc])
-            yt = np.concatenate([y[tr], np.zeros(len(xc), np.int64)])
-            net = FallModel.train(xt, yt, xvc, yvc, channels="acc", seed=seed, augment=aug)
-            thr = keep_falls(net.scores(xv), yv)  # falls only matter for the threshold
-            row, cv = evaluate(net, cond, x, y, test, va, thr, test_acc)
-            rows.append({"seed": seed, "fold": ds, **row})
-            curves.update({f"{ds}|{cond}|{k}": v for k, v in cv.items()})
-            del net
-            torch.cuda.empty_cache()
-        pd.DataFrame(rows).to_csv(out / f"metrics_seed{seed}.csv", index=False)
-        np.savez(out / f"curves_seed{seed}.npz", **curves)
-        print(f"[seed {seed}] {ds} done ({time.time() - t0:.0f}s)", flush=True)
+        added["c24-mined"] = np.concatenate([SOURCE.windows(people.train, RANDOM_K - n_mined, fold.seed, "mined-random", fold.name),
+                                             mined_windows(real.model, people.train, n_mined)])
+    del real
+    torch.cuda.empty_cache()
+    for cond, xc in added.items():
+        trained = fold.train_model("acc", augment=aug, extra=(xc, np.zeros(len(xc), np.int64)), extra_validation=x_c24_val)
+        row, curve = evaluate(trained, fold, test_acc)
+        results.save(cond, fold.seed, fold.key, [row], curve)
+        del trained
+        torch.cuda.empty_cache()
 
 
 # ----------------------------------------------------------------------------------- report
@@ -136,19 +135,24 @@ COLS = ["auroc", "ap", "fa_h_at_95sens_oracle", "sensitivity", "false_alarms_per
 LOWER = {"fa_h_at_95sens_oracle", "false_alarms_per_h", "fl_events_per_day_at_val_thr", "fl_events_per_day_at_95sens"}
 
 
-def report() -> None:
-    out = REPORTS / "negatives"
-    df = pd.concat([pd.read_csv(f) for f in sorted(out.glob("metrics_seed*.csv"))])
+def _table(results: Results) -> pd.DataFrame:
+    """Stored rows plus the sensitivity at each alarm budget, read off every key's free-living curve."""
+    df = results.table()
     sens = {f"sens_at_{b}_per_day": [] for b in BUDGETS}
     for r in df.itertuples():
-        cv = np.load(out / f"curves_seed{r.seed}.npz")
-        k = f"{r.fold}|{r.cond}|"
+        cv = results.arrays(r.condition, r.seed, r.fold)
         for b in BUDGETS:
-            sens[f"sens_at_{b}_per_day"].append(sensitivity_at_budget(cv[k + "grid"], cv[k + "ev"], cv[k + "falls"], b))
-    df = df.assign(**sens)
+            sens[f"sens_at_{b}_per_day"].append(sensitivity_at_budget(cv["grid"], cv["ev"], cv["falls"], b))
+    return df.assign(**sens)
+
+
+def report() -> None:
+    out = REPORTS / "negatives"
+    df = _table(Results(RUNS))
+    df = df[df.condition.isin(CONDITIONS)]
     seeds = df.seed.nunique()
-    per = df.groupby(["cond", "seed"])[COLS].mean()  # macro over held-out fall datasets
-    mean, std = per.groupby("cond").mean(), per.groupby("cond").std()
+    per = df.groupby(["condition", "seed"])[COLS].mean()  # macro over held-out fall datasets
+    mean, std = per.groupby("condition").mean(), per.groupby("condition").std()
     L = ["# Capture-24 as training negatives\n"]
     L.append(f"Seeds: {seeds}. Leave-one-fall-dataset-out, accel-only augmented CNN (stage 1). Capture-24 "
              f"participants P001-P100 (usable ones: 80% train / 20% validation negatives) are added to training; "
@@ -185,7 +189,7 @@ def report() -> None:
     L.append("")
     for k, title in (("sens_at_50_per_day", "Sensitivity at 50 alarms/day"), ("fl_events_per_day_at_95sens", "Free-living alarms/day at 95% sensitivity")):
         L.append(f"## Per held-out fall dataset: {title}\n")
-        pv = df.groupby(["cond", "fold"])[k].mean().unstack()
+        pv = df.groupby(["condition", "fold"])[k].mean().unstack()
         L.append("| condition | " + " | ".join(pv.columns) + " |")
         L.append("|---|" + "---|" * len(pv.columns))
         for c in CONDITIONS:
@@ -281,65 +285,42 @@ SCALE_KS = (5000, 15000)  # random Capture-24 windows per training person (negat
 
 def scale(seed: int, ks: tuple[int, ...] = SCALE_KS) -> None:
     """More random Capture-24 negatives per training person, same folds/seeds/held-out people as ``run``.
-    Every (seed, K, fold) result is saved on its own, so an interrupted run resumes."""
+    Every (K, seed, fold) result is stored on its own (condition ``c24-random-<K>``), so an interrupted run resumes."""
     t0 = time.time()
-    X = np.load(PROCESSED / "X.npy")
-    meta = pd.read_csv(PROCESSED / "meta.csv")
-    y = meta.label.to_numpy().astype(np.int64)
-    x = X[:, :, :3]
-    aug = Augment()
+    data, results, aug = FallData.load(), Results(RUNS), Augment()
     people = SOURCE.split(seed)
     test_acc = [SOURCE.signal(p) for p in people.held_out]
     x_c24_val = SOURCE.windows(people.validation, VAL_K, seed, "validation")
-    out = REPORTS / "negatives" / "scale"
-    out.mkdir(parents=True, exist_ok=True)
+    folds = lodo_folds(data, seed)
     for k in ks:
-        for ds in sorted(meta.dataset.unique()):
-            f = out / f"seed{seed}_K{k}_{ds}.csv"
-            if f.exists():
+        for fold in folds:
+            cond = f"c24-random-{k}"
+            if results.has(cond, seed, fold.key):
                 continue
-            test = np.where(meta.dataset == ds)[0]
-            tr, va = split_validation(meta, np.where(meta.dataset != ds)[0], seed)
-            xv, yv = x[va], y[va]
-            xc = SOURCE.windows(people.train, k, seed, "train", ds)
-            xt = np.concatenate([x[tr], xc])
-            yt = np.concatenate([y[tr], np.zeros(len(xc), np.int64)])
+            xc = SOURCE.windows(people.train, k, seed, "train", fold.name)
+            trained = fold.train_model("acc", augment=aug, extra=(xc, np.zeros(len(xc), np.int64)), extra_validation=x_c24_val)
             del xc
-            xvc = np.concatenate([xv, x_c24_val])
-            yvc = np.concatenate([yv, np.zeros(len(x_c24_val), np.int64)])
-            net = FallModel.train(xt, yt, xvc, yvc, channels="acc", seed=seed, augment=aug)
-            del xt
-            thr = keep_falls(net.scores(xv), yv)
-            row, cv = evaluate(net, f"c24-random-{k}", x, y, test, va, thr, test_acc)
-            np.savez(out / f"seed{seed}_K{k}_{ds}.npz", **cv)
-            pd.DataFrame([{"seed": seed, "fold": ds, "K": k, **row}]).to_csv(f, index=False)
-            del net
+            row, curve = evaluate(trained, fold, test_acc)
+            results.save(cond, seed, fold.key, [row], curve)
+            del trained
             torch.cuda.empty_cache()
-            print(f"[seed {seed}] K={k} {ds} done ({time.time() - t0:.0f}s)", flush=True)
+            print(f"[seed {seed}] K={k} {fold.name} done ({time.time() - t0:.0f}s)", flush=True)
+
+
+def _dose(condition: str) -> int | None:
+    """Random Capture-24 windows per training person of a stored condition (None: not a random-negatives dose)."""
+    if condition == "real":
+        return 0
+    if condition == "c24-random":
+        return RANDOM_K
+    return int(condition.removeprefix("c24-random-")) if condition.startswith("c24-random-") else None
 
 
 def scale_report() -> None:
     out = REPORTS / "negatives"
-    rows = []
-    for f in sorted((out / "scale").glob("seed*_K*_*.csv")):
-        r = pd.read_csv(f).iloc[0]
-        cv = np.load(f.with_suffix(".npz"))
-        d = r.to_dict()
-        for b in BUDGETS:
-            d[f"sens_at_{b}_per_day"] = sensitivity_at_budget(cv["grid"], cv["ev"], cv["falls"], b)
-        rows.append(d)
-    new = pd.DataFrame(rows)
-    old = pd.concat([pd.read_csv(f) for f in sorted(out.glob("metrics_seed*.csv"))])
-    sens = {f"sens_at_{b}_per_day": [] for b in BUDGETS}
-    for r in old.itertuples():
-        cv = np.load(out / f"curves_seed{r.seed}.npz")
-        k = f"{r.fold}|{r.cond}|"
-        for b in BUDGETS:
-            sens[f"sens_at_{b}_per_day"].append(sensitivity_at_budget(cv[k + "grid"], cv[k + "ev"], cv[k + "falls"], b))
-    old = old.assign(**sens)
-    old = old[old.cond.isin(["real", "c24-random"])].assign(K=lambda d: np.where(d.cond == "real", 0, RANDOM_K))
-    df = pd.concat([old, new.assign(K=new.K.astype(int))])
-    seeds = sorted(set(new.seed))
+    df = _table(Results(RUNS))
+    df = df.assign(K=df.condition.map(_dose)).dropna(subset=["K"]).astype({"K": int})
+    seeds = sorted(int(s) for s in df[df.K > RANDOM_K].seed.unique())
     df = df[df.seed.isin(seeds)]
     per = df.groupby(["K", "seed"])[COLS].mean()
     mean, std = per.groupby("K").mean(), per.groupby("K").std()

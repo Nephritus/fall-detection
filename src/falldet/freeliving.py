@@ -18,15 +18,14 @@ import time
 
 import numpy as np
 import pandas as pd
-import torch
 
 from .model import FallModel
 from .alarms import REFRACTORY_S, FalseAlarms, per_day_ci
 from .augment import Augment
-from .baseline import split_validation
 from .capture24 import Capture24
-from .cli import PROCESSED, RAW, REPORTS
-from .rules import keep_falls, lodo_pooled
+from .paths import PROCESSED, RAW, REPORTS
+from .rules import lodo_pooled
+from .runner import FallData, final_fold
 
 OUT = PROCESSED / "capture24"
 SOURCE = Capture24(OUT)
@@ -44,39 +43,20 @@ def fit_models(seeds: int, root=OUT, extra=None) -> pd.DataFrame:
     tp = root / "thresholds.csv"
     if tp.exists() and pd.read_csv(tp).seed.nunique() >= seeds:
         return pd.read_csv(tp)
-    X = np.load(PROCESSED / "X.npy")
-    meta = pd.read_csv(PROCESSED / "meta.csv")
-    y = meta.label.to_numpy().astype(np.int64)
-    x = X[:, :, :3]
-    aug = Augment()
-    datasets = sorted(meta.dataset.unique())
+    data, aug = FallData.load(), Augment()
     rows, t0 = [], time.time()
     for seed in range(seeds):
-        xn, xnv = extra(seed) if extra else (x[:0], x[:0])
-
-        def fit(tr_idx, va_idx):
-            xt = np.concatenate([x[tr_idx], xn])
-            yt = np.concatenate([y[tr_idx], np.zeros(len(xn), np.int64)])
-            xv = np.concatenate([x[va_idx], xnv])
-            yv = np.concatenate([y[va_idx], np.zeros(len(xnv), np.int64)])
-            return FallModel.train(xt, yt, xv, yv, channels="acc", seed=seed, augment=aug)
-
-        tr, va = split_validation(meta, np.arange(len(meta)), seed)
-        net = fit(tr, va)
-        thr = {"val-slice": keep_falls(net.scores(x[va]), y[va])}
-        net.save(root / "models" / f"seed{seed}.pt")
-        del net
-        falls, fall_scores = [], {}
-        for s in datasets:  # nested leave-one-dataset-out, as in threshold.py
-            s_idx = np.where(meta.dataset == s)[0]
-            itr, iva = split_validation(meta, np.where(meta.dataset != s)[0], seed)
-            inet = fit(itr, iva)
-            fs_ = inet.scores(x[s_idx])[y[s_idx] == 1]
-            falls.append(fs_)
-            fall_scores[s] = fs_
-            del inet
-            torch.cuda.empty_cache()
-        thr["lodo-pooled"] = lodo_pooled(falls)
+        fold = final_fold(data, seed)
+        kw = {"augment": aug}
+        if extra:
+            xn, xnv = extra(seed)
+            kw |= {"extra": (xn, np.zeros(len(xn), np.int64)), "extra_validation": xnv}
+        trained = fold.train_model("acc", **kw)
+        thr = {"val-slice": trained.threshold}
+        trained.model.save(root / "models" / f"seed{seed}.pt")
+        del trained
+        fall_scores = fold.out_of_dataset_fall_scores("acc", **kw)  # nested leave-one-dataset-out
+        thr["lodo-pooled"] = lodo_pooled(fall_scores)
         np.savez(root / "fall_scores" / f"seed{seed}.npz", **fall_scores)
         rows += [{"seed": seed, "rule": r, "threshold": t} for r, t in thr.items()]
         print(f"[fit] seed {seed} done ({time.time() - t0:.0f}s) {thr}", flush=True)

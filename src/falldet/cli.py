@@ -10,12 +10,8 @@ from pathlib import Path
 import numpy as np
 
 from .loaders import LOADERS
+from .paths import PROCESSED, RAW
 from .windows import build_windows
-
-ROOT = Path(__file__).resolve().parents[2]
-RAW = ROOT / "data" / "raw"
-PROCESSED = ROOT / "data" / "processed"
-REPORTS = ROOT / "reports"
 
 
 def prepare() -> None:

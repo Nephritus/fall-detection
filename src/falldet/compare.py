@@ -7,6 +7,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from .runner import Results
+
 METRICS = ["sensitivity", "specificity", "false_alarms_per_h", "auroc", "ap", "fa_h_at_95sens_oracle"]
 KEY = ["protocol", "fold", "seed", "model", "channels", "stage"]
 
@@ -16,8 +18,8 @@ def _variant(df: pd.DataFrame) -> pd.Series:
 
 
 def run(base_dir: Path, other_dir: Path) -> None:
-    a = pd.read_csv(base_dir / "metrics.csv")
-    b = pd.read_csv(other_dir / "metrics.csv")
+    a = Results(base_dir / "runs").table()
+    b = Results(other_dir / "runs").table()
     a, b = (d[d.model == "cnn"].copy() for d in (a, b))
     j = a.merge(b, on=KEY, suffixes=("_base", "_aug"))
     j["variant"] = _variant(j)

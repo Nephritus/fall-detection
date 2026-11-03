@@ -1,0 +1,2 @@
+protocol,model,channels,stage,threshold,mined,params,n_fall,n_adl,sensitivity,specificity,false_alarms_per_h,fa_h_at_95sens_oracle,auroc,ap,dip_g,peak_g
+cv,threshold,acc,-,,0,0,736,4550,0.9972826086956522,0.8083516483516483,344.967032967033,,,,1.5,2.0

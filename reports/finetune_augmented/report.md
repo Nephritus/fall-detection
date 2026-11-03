@@ -1,6 +1,6 @@
 # Fine-tuning / per-device adaptation (with augmentation)
 
-Every training step (base model, head-only, full fine-tuning, scratch) uses on-the-fly augmentation: Augment(p=0.5, roll_deg=30.0, tilt_deg=10.0, gain=0.1, stretch=0.1, shift_s=0.2, jitter_acc_g=0.02, jitter_gyro=0.05). Calibration, evaluation and early-stopping data are never augmented.
+Every training step (base model, head-only, full fine-tuning, scratch) uses on-the-fly augmentation: Augment(p=0.5, roll_deg=30.0, tilt_deg=10.0, gain=0.1, stretch=0.1, shift_s=0.2, jitter_acc_g=0.02, jitter_gyro=0.05, enabled=('rotation', 'mirror', 'gain', 'stretch', 'shift', 'jitter')). Calibration, evaluation and early-stopping data are never augmented.
 
 Seeds: 5. Runtime 8.8 min. A held-out dataset stands in for a new watch; its subjects are split in half. **Evaluation** is the fixed half (never used for adaptation), so zero-shot here is not the same number as the baseline report (which used all subjects). **k** is the number of volunteers from the other half used to adapt; a further max(1, k/2) volunteers calibrate (early stopping and the ≥95%-sensitivity threshold). `recalibrated` changes only the threshold; `adabn` re-estimates BatchNorm statistics on the unlabelled pool windows; `scratch` trains on the k volunteers only (control for whether pretraining matters). All simulated falls: optimistic.
 

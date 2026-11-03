@@ -23,15 +23,13 @@ import time
 
 import numpy as np
 import pandas as pd
-import torch
 from scipy.stats import gamma
 
 from .alarms import REFRACTORY_S, FalseAlarms
 from .augment import Augment
-from .baseline import split_validation
-from .cli import PROCESSED, REPORTS
-from .model import FallModel
-from .rules import keep_falls, lodo_pooled
+from .paths import PROCESSED, REPORTS
+from .rules import lodo_pooled
+from .runner import FallData, Fold, Results, lodo_folds
 from .windows import WIN_S
 
 REFRACTORY_SWEEP = (2.0, 10.0, 30.0, 60.0)
@@ -78,38 +76,36 @@ BUDGETS = {
 
 
 # ---------------------------------------------------------------------------------- scoring
-def score(seeds: int) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Scores of every window of each held-out dataset and the two thresholds, per seed."""
+def score_fold(fold: Fold, aug) -> tuple[list[dict], dict[str, np.ndarray]]:
+    """The two thresholds (rows) and the scores of every held-out window (arrays) of one fold."""
+    trained = fold.train_model("acc", augment=aug)
+    p = trained.model.scores(fold.data.windows(fold.test, "acc"))
+    thr = {"val-slice": trained.threshold}
+    del trained
+    thr["lodo-pooled"] = lodo_pooled(fold.out_of_dataset_fall_scores("acc", augment=aug))
+    return [{"rule": r, "threshold": t} for r, t in thr.items()], {"idx": fold.test, "score": p}
+
+
+def score(seeds: int, results: Results) -> None:
+    """Score every held-out dataset per seed into ``results`` (key: ``acc``, seed, held-out dataset)."""
     t0 = time.time()
-    X = np.load(PROCESSED / "X.npy")
-    meta = pd.read_csv(PROCESSED / "meta.csv")
-    y = meta.label.to_numpy().astype(np.int64)
-    aug = Augment()
-    datasets = sorted(meta.dataset.unique())
-    sc, th = [], []
+    data, aug = FallData.load(), Augment()
     for seed in range(seeds):
-        for ds in datasets:
-            test = np.where(meta.dataset == ds)[0]
-            src = np.where(meta.dataset != ds)[0]
-            tr, va = split_validation(meta, src, seed)
-            net = FallModel.train(X[tr], y[tr], X[va], y[va], channels="acc", seed=seed, augment=aug)
-            thr = {"val-slice": keep_falls(net.scores(X[va]), y[va])}
-            p = net.scores(X[test])
-            del net
-            falls = []
-            for s in sorted(set(datasets) - {ds}):
-                s_idx = np.where(meta.dataset == s)[0]
-                itr, iva = split_validation(meta, np.where(~meta.dataset.isin([ds, s]))[0], seed)
-                inet = FallModel.train(X[itr], y[itr], X[iva], y[iva], channels="acc", seed=seed, augment=aug)
-                ps = inet.scores(X[s_idx])
-                falls.append(ps[y[s_idx] == 1])
-                del inet
-                torch.cuda.empty_cache()
-            thr["lodo-pooled"] = lodo_pooled(falls)
-            sc.append(pd.DataFrame({"seed": seed, "dataset": ds, "idx": test, "score": p}))
-            th += [{"seed": seed, "dataset": ds, "rule": r, "threshold": t} for r, t in thr.items()]
-            print(f"[seed {seed}] {ds} done ({time.time() - t0:.0f}s)", flush=True)
-    return pd.concat(sc), pd.DataFrame(th)
+        for fold in lodo_folds(data, seed):
+            if results.has("acc", seed, fold.key):
+                continue
+            results.save("acc", seed, fold.key, *score_fold(fold, aug))
+            print(f"[seed {seed}] {fold.key} done ({time.time() - t0:.0f}s)", flush=True)
+
+
+def stored(results: Results, seeds: int) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Scores (seed, dataset, idx, score) and thresholds (seed, dataset, rule, threshold) of seeds < ``seeds``."""
+    t = results.table().rename(columns={"fold": "dataset"})
+    t = t[(t.condition == "acc") & (t.seed < seeds)]
+    thr = t[["seed", "dataset", "rule", "threshold"]].reset_index(drop=True)
+    sc = [pd.DataFrame({"seed": s, "dataset": d, **results.arrays("acc", s, d)})
+          for s, d in thr[["seed", "dataset"]].drop_duplicates().itertuples(index=False)]
+    return pd.concat(sc, ignore_index=True), thr
 
 
 def evaluate(meta: pd.DataFrame, scores: pd.DataFrame, thr: pd.DataFrame, refractory: float) -> pd.DataFrame:
@@ -168,14 +164,9 @@ def daily(rt: pd.DataFrame, budget: dict, upper: bool) -> pd.DataFrame:
 def run(seeds: int = 5) -> None:
     t0 = time.time()
     out = REPORTS / "alarms"
-    out.mkdir(parents=True, exist_ok=True)
-    sp, tp = out / "scores.csv.gz", out / "thresholds.csv"
-    if sp.exists() and tp.exists() and pd.read_csv(tp).seed.nunique() >= seeds:
-        scores, thr = pd.read_csv(sp), pd.read_csv(tp)  # reuse saved scores (delete to retrain)
-    else:
-        scores, thr = score(seeds)
-        scores.to_csv(sp, index=False)
-        thr.to_csv(tp, index=False)
+    results = Results(out / "runs")  # stored folds are reused (delete to retrain)
+    score(seeds, results)
+    scores, thr = stored(results, seeds)
     write_report(scores, thr, out, seeds, time.time() - t0)
     print(f"report: {out / 'report.md'}")
 

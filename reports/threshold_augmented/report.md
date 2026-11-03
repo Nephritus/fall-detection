@@ -2,7 +2,7 @@
 
 Seeds: 5. Runtime 23.9 min. A held-out dataset stands in for a new device; rules are scored on its evaluation half (same split as `finetune`). All rules use the same trained model per run, so AUROC/AUPRC are identical across rules; only the threshold differs. Target: 95% sensitivity at as few false alarms as possible. Rules are described in `threshold.py`. `adl-budget-N` needs only ADL recordings of the new device; `falls-pool` needs labelled falls; `oracle` uses the evaluation labels and is not realisable. `sens ≥ 0.90` is the share of (seed, dataset) runs that got at least 0.90 sensitivity. All simulated falls: optimistic.
 
-Training (final and nested models) uses augmentation: Augment(p=0.5, roll_deg=30.0, tilt_deg=10.0, gain=0.1, stretch=0.1, shift_s=0.2, jitter_acc_g=0.02, jitter_gyro=0.05).
+Training (final and nested models) uses augmentation: Augment(p=0.5, roll_deg=30.0, tilt_deg=10.0, gain=0.1, stretch=0.1, shift_s=0.2, jitter_acc_g=0.02, jitter_gyro=0.05, enabled=('rotation', 'mirror', 'gain', 'stretch', 'shift', 'jitter')).
 
 ## Accelerometer only
 

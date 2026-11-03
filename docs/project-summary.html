@@ -315,8 +315,8 @@ uv run falldet stage2 --seed 0|1|2 &amp;&amp; uv run falldet stage2 --report   #
 <div class="tablewrap"><table>
 <thead><tr><th>Path</th><th>Contents</th></tr></thead>
 <tbody>
-<tr><td><code>src/falldet/</code></td><td>canonical format, loaders, windows, model, augmentation, experiments (one module each)</td></tr>
-<tr><td><code>reports/</code></td><td>one folder per experiment with <code>report.md</code> and raw <code>metrics.csv</code></td></tr>
+<tr><td><code>src/falldet/</code></td><td>shared modules (canonical format and mounting alignment, loaders, Capture-24 source, fall model, augmentation, evaluation runner, threshold rules, false-alarm counting) and one module per experiment; interface tests in <code>tests/</code></td></tr>
+<tr><td><code>reports/</code></td><td>one folder per experiment with <code>report.md</code> and a <code>runs/</code> store holding one result per (condition, seed, fold), so runs resume and reports rebuild</td></tr>
 <tr><td><code>docs/research/</code></td><td>vendor SDK and model-training research report and its HTML summary</td></tr>
 <tr><td><code>docs/adr/</code>, <code>GLOSSARY.md</code></td><td>decisions (25 Hz common rate; numpy virtual IMU and its test outcome) and shared vocabulary</td></tr>
 <tr><td><code>AGENTS.md</code></td><td>commands, run times, dataset locations, known limits</td></tr>

@@ -28,16 +28,15 @@ from scipy.signal import find_peaks
 from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.metrics import roc_auc_score
 
-from .model import FallModel
 from .alarms import REFRACTORY_S, FalseAlarms
 from .augment import Augment
-from .baseline import split_validation
 from .canonical import FS
-from .cli import PROCESSED, RAW, REPORTS
+from .paths import PROCESSED, RAW, REPORTS
 from .capture24 import LABEL_NAMES
 from .freeliving import OUT, SOURCE
 from .negatives import RANDOM_K, VAL_K
 from .rules import keep_falls
+from .runner import FallData, Results, lodo_folds
 from .windows import STRIDE_S, WIN_S
 
 TRIGGER_G, MIN_SEP_S = 2.0, 2.0
@@ -46,6 +45,7 @@ NEG_PER_PERSON = 600
 SEGS = {"pre": (-1.0, -0.2), "peak": (-0.2, 0.5), "p1": (0.5, 2.0), "p2": (2.0, 4.0)}
 GRID = np.r_[0.0, 1 / (1 + np.exp(-np.linspace(-6, 6.5, 26)))]
 CACHE = OUT / "stage2"
+RUNS = REPORTS / "stage2" / "runs"
 WIN, STRIDE = round(WIN_S * FS), round(STRIDE_S * FS)
 BUDGETS = (10, 25, 50, 100)
 SENS_TARGETS = (0.80, 0.90, 0.95)
@@ -53,7 +53,7 @@ SENS_TARGETS = (0.80, 0.90, 0.95)
 
 def wearer_hours(z) -> list[float]:
     """Exposure per held-out person for a saved fold (older files lack it: rebuilt from signal lengths)."""
-    if "wearer_hours" in z.files:
+    if "wearer_hours" in z:
         return [float(h) for h in z["wearer_hours"]]
     n = [int(np.load(CACHE / f"{p}.npz", allow_pickle=True)["n"]) for p in SOURCE.split(0).held_out]
     return [((k - WIN) // STRIDE + 1) * STRIDE_S / 3600 for k in n]
@@ -208,11 +208,8 @@ def eval_grid(fall: dict, fl: dict, hours: list[float]) -> tuple[np.ndarray, np.
 def run(seed: int) -> None:
     t0 = time.time()
     build_cache()
-    X = np.load(PROCESSED / "X.npy")
-    meta = pd.read_csv(PROCESSED / "meta.csv")
-    y = meta.label.to_numpy().astype(np.int64)
-    x = X[:, :, :3]
-    aug = Augment()
+    data, results, aug = FallData.load(), Results(RUNS), Augment()
+    meta, y = data.meta, data.y
     split = SOURCE.split(seed)
     test_p, fit_p, val_p = split.held_out, split.train, split.validation
     x_c24_val = SOURCE.windows(val_p, VAL_K, seed, "validation")
@@ -222,8 +219,6 @@ def run(seed: int) -> None:
     cols = people[pids[0]]["cols"]
     feat_cols = [c for c in lab.columns if c in cols]
     assert feat_cols == cols, (feat_cols, cols)
-    out = REPORTS / "stage2"
-    out.mkdir(parents=True, exist_ok=True)
 
     def people_rows(ps, cap, fold):
         """Up to ``cap`` candidates per person, keyed by (seed, fold, person) so resuming draws the same."""
@@ -234,25 +229,18 @@ def run(seed: int) -> None:
             xs.append(q[r.choice(len(q), min(cap, len(q)), replace=False)] if len(q) else q)
         return np.concatenate(xs)
 
-    for ds in sorted(meta.dataset.unique()):
-        f = out / f"seed{seed}_{ds}.npz"
-        if f.exists():
+    for fold in lodo_folds(data, seed):
+        if results.has("two-stage", seed, fold.key):
             continue
-        test = np.where(meta.dataset == ds)[0]
-        src = np.where(meta.dataset != ds)[0]
-        tr, va = split_validation(meta, src, seed)
-        val_subj = set(meta.subject.iloc[va])
+        ds, test = fold.name, fold.test
+        val_subj = set(meta.subject.iloc[fold.validation])
         # ---- stage 1: the same Capture-24 negatives as negatives.run's c24-random condition for this fold
         xc = SOURCE.windows(fit_p, RANDOM_K, seed, "train", ds)
-        xt = np.concatenate([x[tr], xc])
-        yt = np.concatenate([y[tr], np.zeros(len(xc), np.int64)])
-        xvc = np.concatenate([x[va], x_c24_val])
-        yvc = np.concatenate([y[va], np.zeros(len(x_c24_val), np.int64)])
-        net = FallModel.train(xt, yt, xvc, yvc, channels="acc", seed=seed, augment=aug)
-        t1_val = keep_falls(net.scores(x[va]), y[va])
-        p_test = net.scores(x[test])
+        trained = fold.train_model("acc", augment=aug, extra=(xc, np.zeros(len(xc), np.int64)), extra_validation=x_c24_val)
+        net, t1_val = trained.model, trained.threshold
+        p_test = net.scores(data.windows(test, "acc"))
         sc = {p: net.score_signal(SOURCE.signal(p)) for p in test_p}
-        del net, xt, xc
+        del trained, net, xc
         torch.cuda.empty_cache()
         # ---- stage 2 training data
         L = lab[lab.dataset != ds]
@@ -302,11 +290,12 @@ def run(seed: int) -> None:
         stage1 = FalseAlarms.from_window_scores([sc[p] for p in test_p])
         ev1 = [stage1.per_day(t1) for t1 in np.r_[GRID, t1_val]]
         sens1 = [(fall["s1"][fall["ctx"]] >= t1).mean() for t1 in np.r_[GRID, t1_val]]
-        np.savez(f, sens=sens, alarms=alarms, ev1=ev1, sens1=sens1, t1_val=t1_val, t2_val=t2_val, hours=sum(hours),
-                 wearer_hours=hours,
-                 **{f"fall_{k}": v for k, v in fall.items()}, **{f"fl_{k}": v for k, v in fl.items()},
-                 stage2_val_auroc=roc_auc_score(yv, pv), n_pos=int(sets["tr"][1].sum()), n_neg=int((1 - sets["tr"][1]).sum()),
-                 n_fall_recs=len(T), n_fall_ctx=int(T.ctx.sum()), n_fall_trig=int((T.trig.to_numpy() & okm).sum()))
+        summary = dict(t1_val=t1_val, t2_val=t2_val, hours=sum(hours), stage2_val_auroc=roc_auc_score(yv, pv),
+                       n_pos=int(sets["tr"][1].sum()), n_neg=int((1 - sets["tr"][1]).sum()), n_fall_recs=len(T),
+                       n_fall_ctx=int(T.ctx.sum()), n_fall_trig=int((T.trig.to_numpy() & okm).sum()))
+        results.save("two-stage", seed, fold.key, [summary],
+                     dict(sens=sens, alarms=alarms, ev1=ev1, sens1=sens1, wearer_hours=hours, **summary,
+                          **{f"fall_{k}": v for k, v in fall.items()}, **{f"fl_{k}": v for k, v in fl.items()}))
         print(f"[seed {seed}] {ds} done ({time.time() - t0:.0f}s)", flush=True)
 
 
@@ -323,11 +312,9 @@ def _sens_at(sens: np.ndarray, alarms: np.ndarray, budget: float) -> float:
 
 def report() -> None:
     out = REPORTS / "stage2"
-    files = sorted(out.glob("seed*_*.npz"))
-    Z = {}
-    for f in files:
-        s, d = f.stem.split("_", 1)
-        Z[(int(s[4:]), d)] = np.load(f)
+    results = Results(RUNS)
+    tab = results.table()
+    Z = {(s, d): results.arrays(c, s, d) for c, s, d in tab[["condition", "seed", "fold"]].itertuples(index=False)}
     seeds = sorted({k[0] for k in Z})
     folds = sorted({k[1] for k in Z})
     held_out = SOURCE.split(0).held_out
@@ -340,9 +327,8 @@ def report() -> None:
              f"({z0['hours']:.0f} h) that no model trained on; alarm events merge with a {REFRACTORY_S:.0f} s refractory period. "
              "Sensitivity is **per fall recording** (simulated falls; not comparable with the per-window figures of earlier reports). "
              "Recordings without the full context are excluded from every sensitivity; recordings whose impact is below the trigger count as misses.\n")
-    stats = pd.DataFrame([{"fold": d, "seed": s, "recs": int(z["n_fall_recs"]), "ctx": int(z["n_fall_ctx"]), "trig": int(z["n_fall_trig"]),
-                           "auroc": float(z["stage2_val_auroc"]), "pos": int(z["n_pos"]), "neg": int(z["n_neg"])}
-                          for (s, d), z in Z.items()])
+    stats = tab.rename(columns={"n_fall_recs": "recs", "n_fall_ctx": "ctx", "n_fall_trig": "trig",
+                                "stage2_val_auroc": "auroc", "n_pos": "pos", "n_neg": "neg"})
     L.append("## 1. Coverage\n")
     L.append("| held-out dataset | fall recordings | with full context | impact ≥ trigger | stage-2 training positives / negatives (per seed) | stage-2 validation AUROC |")
     L.append("|---|---|---|---|---|---|")

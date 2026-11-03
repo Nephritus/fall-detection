@@ -14,33 +14,19 @@ import numpy as np
 import pandas as pd
 import torch
 from sklearn.metrics import average_precision_score, roc_auc_score, roc_curve
-from sklearn.model_selection import GroupKFold
 
 from . import model as M
 from .augment import Augment
 from .canonical import FS
-from .cli import PROCESSED, REPORTS
-from .model import FallModel
+from .paths import PROCESSED, REPORTS
 from .reference import ThresholdReference
-from .rules import TARGET_SENSITIVITY, keep_falls
+from .rules import TARGET_SENSITIVITY
+from .runner import FallData, Fold, Results, cv_folds, lodo_folds
 from .windows import STRIDE_S
 
-VAL_FRACTION = 0.2
 MINE_THRESHOLD_CAP = 0.10  # at most this share of training ADL windows is mined
 MINE_WEIGHT = 3.0
-
-
-def split_validation(meta: pd.DataFrame, train_idx: np.ndarray, seed: int) -> tuple[np.ndarray, np.ndarray]:
-    """Hold out ~20% of the training subjects of every training dataset (at least 1 if >=3)."""
-    rng = np.random.default_rng(seed)
-    sub = meta.iloc[train_idx][["dataset", "subject"]].drop_duplicates()
-    val_subjects = []
-    for _, g in sub.groupby("dataset"):
-        names = sorted(g.subject)
-        k = max(1, round(VAL_FRACTION * len(names))) if len(names) >= 3 else 0
-        val_subjects += list(rng.choice(names, size=k, replace=False))
-    is_val = meta.subject.iloc[train_idx].isin(val_subjects).to_numpy()
-    return train_idx[~is_val], train_idx[is_val]
+CONDITIONS = ("imu", "acc", "reference")  # CNN imu, CNN accel-only, threshold reference
 
 
 def metrics(y: np.ndarray, pred: np.ndarray, score: np.ndarray | None) -> dict:
@@ -66,122 +52,122 @@ def metrics(y: np.ndarray, pred: np.ndarray, score: np.ndarray | None) -> dict:
 
 
 # --------------------------------------------------------------------------------- folds
-def run_fold(X, meta, y, train_idx, test_idx, channels, seed, augment=None):
-    """Train CNN stage 1 and stage 2 (after mining) on one split; return metric rows + predictions."""
-    tr, va = split_validation(meta, train_idx, seed)
-    out, preds = [], {}
+def run_fold(fold: Fold, channels: str, augment=None) -> tuple[list[dict], dict[str, np.ndarray]]:
+    """Train CNN stage 1 and stage 2 (after mining) on one fold; return metric rows + which test windows fired."""
+    d = fold.data
+    x_test, y_test = d.windows(fold.test, channels), d.y[fold.test]
+    out, fired = [], {}
     weights = None
     mined = 0
     for stage in ("stage1", "stage2"):
-        net = FallModel.train(X[tr], y[tr], X[va], y[va], channels=channels, seed=seed, augment=augment,
-                              weights=weights)
-        thr = keep_falls(net.scores(X[va]), y[va])
-        p_test = net.scores(X[test_idx])
+        trained = fold.train_model(channels, augment=augment, weights=weights)
+        thr = trained.threshold
+        p_test = trained.model.scores(x_test)
         out.append({
             "model": "cnn", "channels": channels, "stage": stage, "threshold": thr, "mined": mined,
-            "params": net.n_params, **metrics(y[test_idx], (p_test >= thr).astype(int), p_test),
+            "params": trained.model.n_params, **metrics(y_test, (p_test >= thr).astype(int), p_test),
         })
-        preds[stage] = (p_test, thr)
+        fired[f"fired_{stage}"] = (p_test >= thr).astype(np.int8)
         if stage == "stage1":
-            weights, mined = mine_hard_negatives(X, channels, y, meta, tr, va, seed, augment=augment)
-        del net
+            weights, mined = mine_hard_negatives(fold, channels, augment=augment)
+        del trained
         torch.cuda.empty_cache()
-    return out, preds
+    return out, fired
 
 
-def mine_hard_negatives(X, channels, y, meta, tr, va, seed, folds: int = 3, augment=None):
+def mine_hard_negatives(fold: Fold, channels: str, folds: int = 3, augment=None) -> tuple[np.ndarray, int]:
     """Out-of-fold hard negative mining. Training subjects are split into ``folds`` groups; a model
     trained on the other groups scores the held-out group, and ADL windows that fire at that
     model's own >=95%-sensitivity threshold are hard negatives (the in-sample model would rarely
-    fire on windows it has already fit). Returns per-window loss weights for ``tr`` and the count.
+    fire on windows it has already fit). Returns per-window loss weights for ``fold.train`` and the count.
     """
-    subs = meta.subject.iloc[tr]
+    d, tr = fold.data, fold.train
+    subs = d.meta.subject.iloc[tr]
     names = np.array(sorted(subs.unique()))
-    np.random.default_rng(seed + 1000).shuffle(names)
+    np.random.default_rng(fold.seed + 1000).shuffle(names)
     hard_local, hard_scores = [], []
     for part in np.array_split(names, folds):
         held = subs.isin(part).to_numpy()
-        net = FallModel.train(X[tr[~held]], y[tr[~held]], X[va], y[va], channels=channels, seed=seed,
-                              augment=augment)
-        thr = keep_falls(net.scores(X[va]), y[va])
-        p = net.scores(X[tr[held]])
+        trained = fold.with_training(tr[~held]).train_model(channels, augment=augment)
+        p = trained.model.scores(d.windows(tr[held], channels))
         idx = np.where(held)[0]
-        fire = (y[tr[idx]] == 0) & (p >= thr)
+        fire = (d.y[tr[idx]] == 0) & (p >= trained.threshold)
         hard_local += list(idx[fire])
         hard_scores += list(p[fire])
-        del net
+        del trained
         torch.cuda.empty_cache()
     hard = np.array(hard_local, dtype=int)
-    cap = int(MINE_THRESHOLD_CAP * (y[tr] == 0).sum())
+    cap = int(MINE_THRESHOLD_CAP * (d.y[tr] == 0).sum())
     hard = hard[np.argsort(-np.array(hard_scores))][:cap] if len(hard) else hard
     weights = np.ones(len(tr), dtype=np.float32)
     weights[hard] = MINE_WEIGHT
     return weights, len(hard)
 
 
-def run_reference(X, meta, y, train_idx, test_idx):
-    ref = ThresholdReference().fit(X[train_idx], y[train_idx])
-    pred = ref.predict(X[test_idx])
+def run_reference(fold: Fold) -> tuple[list[dict], dict[str, np.ndarray]]:
+    """The threshold reference, its levels tuned on all of the fold's training subjects (training + validation)."""
+    d = fold.data
+    fit_idx = np.sort(np.r_[fold.train, fold.validation])
+    ref = ThresholdReference().fit(d.windows(fit_idx, "acc"), d.y[fit_idx])
+    pred = ref.predict(d.windows(fold.test, "acc"))
     row = {"model": "threshold", "channels": "acc", "stage": "-", "threshold": float("nan"),
            "mined": 0, "params": 0, "dip_g": ref.dip, "peak_g": ref.peak,
-           **metrics(y[test_idx], pred, None)}
-    return row, pred
+           **metrics(d.y[fold.test], pred, None)}
+    return [row], {"fired": pred.astype(np.int8)}
 
 
 # --------------------------------------------------------------------------------- driver
+def _out(augment: bool):
+    return REPORTS / ("baseline_augmented" if augment else "baseline")
+
+
 def run(seeds: int = 3, augment: bool = False) -> None:
+    """Every (condition, seed, fold) not yet in ``<report dir>/runs``, then the report."""
     t_start = time.time()
-    X = np.load(PROCESSED / "X.npy")
-    meta = pd.read_csv(PROCESSED / "meta.csv")
-    y = meta.label.to_numpy().astype(np.int64)
-    prep = json.loads((PROCESSED / "prepare_log.json").read_text())
+    data = FallData.load()
     aug = Augment() if augment else None
-    datasets = sorted(meta.dataset.unique())
-    print(f"{len(X)} windows, {int(y.sum())} fall; datasets {datasets}; device {M.device()}")
-
-    rows, act_rows = [], []
-
-    def add(protocol, fold, seed, results):
-        for r in results:
-            rows.append({"protocol": protocol, "fold": fold, "seed": seed, **r})
-
+    results = Results(_out(augment) / "runs")
+    print(f"{len(data.X)} windows, {int(data.y.sum())} fall; datasets {data.datasets}; device {M.device()}")
     for seed in range(seeds):
-        # ---- leave-one-dataset-out
-        for d in datasets:
-            test = np.where(meta.dataset == d)[0]
-            train = np.where(meta.dataset != d)[0]
-            for ch in ("imu", "acc"):
-                res, preds = run_fold(X, meta, y, train, test, ch, seed, aug)
-                add("lodo", d, seed, res)
-                if ch == "imu":
-                    for stage, (p, thr) in preds.items():
-                        t = meta.iloc[test][["dataset", "activity", "label"]].copy()
-                        t["fired"] = (p >= thr).astype(int)
-                        t["model"] = f"cnn-{stage}"
-                        act_rows.append(t.assign(seed=seed))
-            row, pred = run_reference(X, meta, y, train, test)
-            add("lodo", d, seed, [row])
-            t = meta.iloc[test][["dataset", "activity", "label"]].copy()
-            t["fired"], t["model"] = pred, "threshold"
-            act_rows.append(t.assign(seed=seed))
-            print(f"[seed {seed}] lodo {d} done ({time.time() - t_start:.0f}s)", flush=True)
-        # ---- subject-wise 5-fold CV over the pooled data
-        gkf = GroupKFold(n_splits=5, shuffle=True, random_state=seed)
-        for k, (train, test) in enumerate(gkf.split(X, y, groups=meta.subject)):
-            for ch in ("imu", "acc"):
-                res, _ = run_fold(X, meta, y, train, test, ch, seed, aug)
-                add("cv", f"fold{k}", seed, res)
-            row, _ = run_reference(X, meta, y, train, test)
-            add("cv", f"fold{k}", seed, [row])
-            print(f"[seed {seed}] cv fold {k} done ({time.time() - t_start:.0f}s)", flush=True)
+        for fold in lodo_folds(data, seed) + cv_folds(data, seed):
+            for cond in CONDITIONS:
+                if results.has(cond, seed, fold.key):
+                    continue
+                t0 = time.time()
+                rows, fired = run_reference(fold) if cond == "reference" else run_fold(fold, cond, aug)
+                rows = [{"protocol": fold.protocol, **r, "seconds": time.time() - t0} for r in rows]
+                # the per-activity tables need which held-out windows fired (CNN imu and the reference)
+                arrays = {"test": fold.test, **fired} if fold.protocol == "lodo" and cond != "acc" else None
+                results.save(cond, seed, fold.key, rows, arrays)
+            print(f"[seed {seed}] {fold.protocol} {fold.name} done ({time.time() - t_start:.0f}s)", flush=True)
+    report(augment, seeds)
 
-    out = REPORTS / ("baseline_augmented" if augment else "baseline")
-    out.mkdir(parents=True, exist_ok=True)
-    df = pd.DataFrame(rows)
-    df.to_csv(out / "metrics.csv", index=False)
+
+def report(augment: bool = False, seeds: int | None = None) -> None:
+    """Rebuild ``per_activity_windows.csv.gz`` and ``report.md`` from the stored results (seeds < ``seeds``)."""
+    out = _out(augment)
+    results = Results(out / "runs")
+    df = results.table()
+    if seeds is not None:
+        df = df[df.seed < seeds]
+    meta = pd.read_csv(PROCESSED / "meta.csv")
+    act_rows = []
+    lodo = df[df.protocol == "lodo"]
+    for seed in sorted(lodo.seed.unique()):
+        for d in sorted(lodo[lodo.seed == seed].fold.unique()):
+            for cond, models in (("imu", {"fired_stage1": "cnn-stage1", "fired_stage2": "cnn-stage2"}),
+                                 ("reference", {"fired": "threshold"})):
+                a = results.arrays(cond, int(seed), d)
+                for k, m in models.items():
+                    t = meta.iloc[a["test"]][["dataset", "activity", "label"]].copy()
+                    t["fired"], t["model"] = a[k].astype(int), m
+                    act_rows.append(t.assign(seed=seed))
     acts = pd.concat(act_rows)
     acts.to_csv(out / "per_activity_windows.csv.gz", index=False)
-    write_report(df, acts, prep, out, seeds, time.time() - t_start, aug)
+    timed = df.groupby(["condition", "seed", "fold"]).seconds.first() if "seconds" in df else pd.Series(dtype=float)
+    seconds = timed.sum() if len(timed) and timed.notna().all() else None
+    prep = json.loads((PROCESSED / "prepare_log.json").read_text())
+    write_report(df, acts, prep, out, df.seed.nunique(), seconds, Augment() if augment else None)
     print(f"report: {out / 'report.md'}")
 
 
@@ -209,7 +195,8 @@ def write_report(df, acts, prep, out, seeds, seconds, aug=None) -> None:
     if aug:
         L.append(f"Training windows are augmented on the fly (`augment.py`): {aug}. Validation and test "
                  "windows are untouched.\n")
-    L.append(f"Seeds: {seeds}. Runtime {seconds / 60:.1f} min. Values are mean ± std over seeds "
+    runtime = f"{seconds / 60:.1f} min" if seconds is not None else "not recorded (results converted from an earlier run)"
+    L.append(f"Seeds: {seeds}. Runtime {runtime}. Values are mean ± std over seeds "
              "(and over folds where noted). Sensitivity is at the threshold that gives ≥95% "
              "sensitivity on a subject-wise validation slice of the training data; the threshold "
              "reference has one fixed operating point. False alarms/h counts false-alarm windows "
@@ -283,7 +270,7 @@ def write_report(df, acts, prep, out, seeds, seconds, aug=None) -> None:
              f"threshold (capped at {MINE_THRESHOLD_CAP:.0%} of ADL windows) are re-weighted ×{MINE_WEIGHT:g} "
              f"and the model is retrained from scratch (`stage2`). Windows mined per fold: median "
              f"{int(m2.mined.median())}, range {int(m2.mined.min())}–{int(m2.mined.max())}.\n")
-    L.append(f"Model: 3 conv blocks (32/64/128), {int(df[df.model == 'cnn'].params.iloc[0])} parameters "
+    L.append(f"Model: 3 conv blocks (32/64/128), {int(df[(df.model == 'cnn') & (df.channels == 'imu')].params.iloc[0])} parameters "
              "for 8 input channels (the accel-only variant is smaller).\n")
 
     # ---- per-activity
