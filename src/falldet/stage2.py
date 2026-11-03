@@ -19,6 +19,7 @@ below the trigger, are reported separately (below-trigger ones count as misses).
 from __future__ import annotations
 
 import time
+import zlib
 
 import numpy as np
 import pandas as pd
@@ -33,9 +34,9 @@ from .augment import Augment
 from .baseline import choose_threshold, split_validation
 from .canonical import FS
 from .cli import PROCESSED, RAW, REPORTS
-from .freeliving import LABELS as C24_LABELS
-from .freeliving import OUT, score_signal
-from .negatives import RANDOM_K, VAL_K, load_acc, random_windows, test_pids
+from .capture24 import LABEL_NAMES
+from .freeliving import OUT, SOURCE, score_signal
+from .negatives import RANDOM_K, VAL_K, encode
 from .windows import STRIDE_S, WIN_S
 
 TRIGGER_G, MIN_SEP_S = 2.0, 2.0
@@ -53,8 +54,7 @@ def wearer_hours(z) -> list[float]:
     """Exposure per held-out person for a saved fold (older files lack it: rebuilt from signal lengths)."""
     if "wearer_hours" in z.files:
         return [float(h) for h in z["wearer_hours"]]
-    prep = pd.read_csv(OUT / "prepare_log.csv")
-    n = [int(np.load(CACHE / f"{p}.npz", allow_pickle=True)["n"]) for p in test_pids(prep)]
+    n = [int(np.load(CACHE / f"{p}.npz", allow_pickle=True)["n"]) for p in SOURCE.split(0).held_out]
     return [((k - WIN) // STRIDE + 1) * STRIDE_S / 3600 for k in n]
 
 
@@ -111,17 +111,16 @@ def build_cache() -> None:
     from .loaders import LOADERS
 
     CACHE.mkdir(parents=True, exist_ok=True)
-    prep = pd.read_csv(OUT / "prepare_log.csv")
     t0 = time.time()
-    for pid in sorted(prep[prep.excluded.isna()].pid):
+    for pid in SOURCE.people():
         f = CACHE / f"{pid}.npz"
         if f.exists():
             continue
-        acc = load_acc(pid)
+        acc = SOURCE.signal(pid)
         idx = candidates(acc)
-        lab = np.load(OUT / f"{pid}.npz")["lab"]
         feat = features(acc, idx)
-        np.savez(f, idx=idx, lab=lab[idx], n=len(acc), cols=np.array(feat.columns), X=feat.to_numpy(np.float32))
+        np.savez(f, idx=idx, lab=SOURCE.labels(pid)[idx].astype(str), n=len(acc), cols=np.array(feat.columns),
+                 X=feat.to_numpy(np.float32))
         if int(pid[1:]) % 20 == 0:
             print(f"[cache] {pid} {len(idx)} candidates ({time.time() - t0:.0f}s)", flush=True)
     if (CACHE / "lab.pkl").exists():
@@ -184,10 +183,12 @@ def c24_alarms(fl: dict, score: np.ndarray, hours: list[float], label_hours: lis
     """Candidates of the held-out Capture-24 people as detections: alarm time = impact + POST_S (when the
     device would alert), one wearer per person. ``fl["t"]`` is impact time in seconds per person (files
     written before the counting refactor stored it offset by 1e6 s per person; the offset is removed)."""
-    names = {**dict(enumerate(C24_LABELS)), 255: "unlabelled"}
     sel = [np.where(fl["pid"] == k)[0] for k in range(len(hours))]
     times = [np.round((fl["t"][i] - k * 1e6) * FS) / FS + POST_S for k, i in enumerate(sel)]
-    labels = [np.array([names[int(c)] for c in fl["lab"][i]]) for i in sel] if label_hours is not None else None
+    lab = fl["lab"]
+    if lab.dtype.kind in "iu":  # files written before the source refactor stored label codes
+        lab = np.array([LABEL_NAMES[int(c)] for c in lab])
+    labels = [lab[i] for i in sel] if label_hours is not None else None
     return FalseAlarms(times, [score[i] for i in sel], hours, labels, label_hours)
 
 
@@ -211,14 +212,10 @@ def run(seed: int) -> None:
     y = meta.label.to_numpy().astype(np.int64)
     x = M.make_inputs(X, "acc")
     aug = Augment()
-    prep = pd.read_csv(OUT / "prepare_log.csv")
-    pids = sorted(prep[prep.excluded.isna()].pid)
-    train_pool = [p for p in pids if int(p[1:]) <= 100]
-    test_p = test_pids(prep)
-    rng = np.random.default_rng(seed + 321)  # same people split as negatives.run
-    val_p = sorted(rng.choice(train_pool, size=max(1, round(0.2 * len(train_pool))), replace=False))
-    fit_p = [p for p in train_pool if p not in val_p]
-    x_c24_val = random_windows(val_p, VAL_K, rng)
+    split = SOURCE.split(seed)
+    test_p, fit_p, val_p = split.held_out, split.train, split.validation
+    x_c24_val = encode(SOURCE.windows(val_p, VAL_K, seed, "validation"))
+    pids = SOURCE.people()
     people = load_people(pids)
     lab = pd.read_pickle(CACHE / "lab.pkl")
     cols = people[pids[0]]["cols"]
@@ -226,13 +223,14 @@ def run(seed: int) -> None:
     assert feat_cols == cols, (feat_cols, cols)
     out = REPORTS / "stage2"
     out.mkdir(parents=True, exist_ok=True)
-    srng = np.random.default_rng(seed + 77)
 
-    def people_rows(ps, cap):
+    def people_rows(ps, cap, fold):
+        """Up to ``cap`` candidates per person, keyed by (seed, fold, person) so resuming draws the same."""
         xs = []
         for p in ps:
             q = people[p]["X"]
-            xs.append(q[srng.choice(len(q), min(cap, len(q)), replace=False)] if len(q) else q)
+            r = np.random.default_rng([seed, zlib.crc32(fold.encode()), zlib.crc32(p.encode())])
+            xs.append(q[r.choice(len(q), min(cap, len(q)), replace=False)] if len(q) else q)
         return np.concatenate(xs)
 
     for ds in sorted(meta.dataset.unique()):
@@ -243,8 +241,8 @@ def run(seed: int) -> None:
         src = np.where(meta.dataset != ds)[0]
         tr, va = split_validation(meta, src, seed)
         val_subj = set(meta.subject.iloc[va])
-        # ---- stage 1 (as negatives.run, c24-random)
-        xc = random_windows(fit_p, RANDOM_K, rng)
+        # ---- stage 1: the same Capture-24 negatives as negatives.run's c24-random condition for this fold
+        xc = encode(SOURCE.windows(fit_p, RANDOM_K, seed, "train", ds))
         xt = np.concatenate([x[tr], xc])
         yt = np.concatenate([y[tr], np.zeros(len(xc), np.int64)])
         xvc = np.concatenate([x[va], x_c24_val])
@@ -252,7 +250,7 @@ def run(seed: int) -> None:
         net = M.fit(xt, yt, np.ones(len(xt), np.float32), xvc, yvc, seed, augment=aug)
         t1_val = choose_threshold(M.predict_proba(net, x[va]), y[va])
         p_test = M.predict_proba(net, x[test])
-        sc = {p: score_signal(net, load_acc(p)) for p in test_p}
+        sc = {p: score_signal(net, SOURCE.signal(p)) for p in test_p}
         del net, xt, xc
         torch.cuda.empty_cache()
         # ---- stage 2 training data
@@ -263,7 +261,7 @@ def run(seed: int) -> None:
         sets = {}
         for k, part in parts.items():
             ps = fit_p if k == "tr" else val_p
-            neg = np.concatenate([part[~part.is_fall][feat_cols].to_numpy(np.float32), people_rows(ps, NEG_PER_PERSON)])
+            neg = np.concatenate([part[~part.is_fall][feat_cols].to_numpy(np.float32), people_rows(ps, NEG_PER_PERSON, ds)])
             pos_df = part[part.is_fall]
             pos = pos_df[feat_cols].to_numpy(np.float32)
             w_pos = 1.0 / pos_df.groupby("dataset").dataset.transform("size").to_numpy()
@@ -331,13 +329,13 @@ def report() -> None:
         Z[(int(s[4:]), d)] = np.load(f)
     seeds = sorted({k[0] for k in Z})
     folds = sorted({k[1] for k in Z})
-    prep = pd.read_csv(OUT / "prepare_log.csv")
+    held_out = SOURCE.split(0).held_out
     L = ["# Second-stage confirmation\n"]
     z0 = next(iter(Z.values()))
     L.append(f"Seeds: {len(seeds)}. Leave-one-fall-dataset-out ({', '.join(folds)}); stage 1 = accel-only augmented CNN trained with "
              f"Capture-24 negatives (as `reports/negatives`), stage 2 = gradient boosting on context features "
              f"({PRE_S:g} s before to {POST_S:g} s after a candidate impact, |a| ≥ {TRIGGER_G:g} g, so **alarms are delayed by "
-             f"{POST_S:g} s**). Free-living cost is measured on the {len(test_pids(prep))} held-out Capture-24 people "
+             f"{POST_S:g} s**). Free-living cost is measured on the {len(held_out)} held-out Capture-24 people "
              f"({z0['hours']:.0f} h) that no model trained on; alarm events merge with a {REFRACTORY_S:.0f} s refractory period. "
              "Sensitivity is **per fall recording** (simulated falls; not comparable with the per-window figures of earlier reports). "
              "Recordings without the full context are excluded from every sensitivity; recordings whose impact is below the trigger count as misses.\n")
@@ -421,11 +419,10 @@ def report() -> None:
     L.append("")
 
     # where remaining alarms come from
-    lab_names = {**dict(enumerate(C24_LABELS)), 255: "unlabelled"}
     label_hours = []
-    for p in test_pids(prep):
-        u, c = np.unique(np.load(OUT / f"{p}.npz")["lab"], return_counts=True)
-        label_hours.append({lab_names[int(k)]: n / FS / 3600 for k, n in zip(u, c)})
+    for p in held_out:
+        u, c = np.unique(SOURCE.labels(p), return_counts=True)
+        label_hours.append({k: n / FS / 3600 for k, n in zip(u, c)})
     hours = pd.DataFrame(label_hours).sum().to_dict()
     cnt = {}
     for (s, d), z in Z.items():
@@ -436,7 +433,7 @@ def report() -> None:
             for lbl, v in ev.items():
                 cnt[(key, lbl)] = cnt.get((key, lbl), 0) + int(v)
     L.append("## 4. Where the remaining alarms come from (practical rule)\n")
-    L.append(f"Events per hour of each Capture-24 activity, pooled over the held-out datasets and seeds (the {len(test_pids(prep))} "
+    L.append(f"Events per hour of each Capture-24 activity, pooled over the held-out datasets and seeds (the {len(held_out)} "
              "held-out people are scored once per fold and seed; an alarm event belongs to the activity of the candidate that opened it).\n")
     L.append("| activity | hours | stage 1 + trigger | two-stage |")
     L.append("|---|---|---|---|")

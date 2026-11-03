@@ -36,10 +36,7 @@ from .augment import Augment
 from .baseline import choose_threshold, metrics, split_validation
 from .canonical import FS
 from .cli import PROCESSED, REPORTS
-from .freeliving import OUT, score_signal
-from .windows import STRIDE_S, WIN_S
-
-WIN, STRIDE = round(WIN_S * FS), round(STRIDE_S * FS)
+from .freeliving import OUT, SOURCE, score_signal
 RANDOM_K = 1500  # Capture-24 windows added per training participant
 MINED_FRACTION = 2 / 3
 VAL_K = 800  # random windows per Capture-24 validation participant
@@ -48,39 +45,16 @@ CONDITIONS = ("real", "c24-random", "c24-mined")
 
 
 # --------------------------------------------------------------------------------- windows
-def to_inputs(w: np.ndarray) -> np.ndarray:
-    """(N, WIN, 3) accel windows in g -> model inputs (N, 4, WIN), as ``model.make_inputs(.., 'acc')``."""
-    mag = np.linalg.norm(w, axis=2, keepdims=True)
-    return (np.concatenate([w, mag], axis=2) / M.ACC_SCALE).transpose(0, 2, 1).astype(np.float32)
-
-
-def gather(acc: np.ndarray, starts: np.ndarray) -> np.ndarray:
-    return acc[starts[:, None] + np.arange(WIN)]
-
-
-def n_windows(acc: np.ndarray) -> int:
-    return (len(acc) - WIN) // STRIDE + 1
-
-
-def load_acc(pid: str) -> np.ndarray:
-    return np.load(OUT / f"{pid}.npz")["acc"]
-
-
-def random_windows(pids: list[str], k: int, rng: np.random.Generator) -> np.ndarray:
-    out = []
-    for pid in pids:
-        acc = load_acc(pid)
-        s = rng.choice(n_windows(acc), size=min(k, n_windows(acc)), replace=False) * STRIDE
-        out.append(to_inputs(gather(acc, s)))
-    return np.concatenate(out)
+def encode(w: np.ndarray) -> np.ndarray:
+    """Canonical accelerometer windows -> accel-only model inputs."""
+    return M.make_inputs(w, "acc")
 
 
 def mined_windows(net: M.FallCNN, pids: list[str], k: int, sep: int = 3) -> np.ndarray:
     """Top-scoring windows per participant under ``net`` (greedy, ``sep`` windows apart)."""
     out = []
     for pid in pids:
-        acc = load_acc(pid)
-        sc = score_signal(net, acc)
+        sc = score_signal(net, SOURCE.signal(pid))
         taken = np.zeros(len(sc), bool)
         pick = []
         for i in np.argsort(-sc)[: k * 10]:
@@ -89,7 +63,7 @@ def mined_windows(net: M.FallCNN, pids: list[str], k: int, sep: int = 3) -> np.n
                 pick.append(i)
                 if len(pick) == k:
                     break
-        out.append(to_inputs(gather(acc, np.array(pick) * STRIDE)))
+        out.append(SOURCE.windows_at(pid, np.array(pick)))
     return np.concatenate(out)
 
 
@@ -120,17 +94,11 @@ def run(seed: int) -> None:
     y = meta.label.to_numpy().astype(np.int64)
     x = M.make_inputs(X, "acc")
     aug = Augment()
-    prep = pd.read_csv(OUT / "prepare_log.csv")
-    pids = sorted(prep[prep.excluded.isna()].pid)
-    train_pool = [p for p in pids if int(p[1:]) <= 100]
-    test_pool = [p for p in pids if int(p[1:]) > 100]
-    rng = np.random.default_rng(seed + 321)
-    val_p = sorted(rng.choice(train_pool, size=max(1, round(0.2 * len(train_pool))), replace=False))
-    fit_p = [p for p in train_pool if p not in val_p]
-    test_acc = [load_acc(p) for p in test_pool]
-    print(f"seed {seed}: C24 train {len(fit_p)}, val {len(val_p)}, test {len(test_pool)} participants "
-          f"({sum(len(a) for a in test_acc) / FS / 3600:.0f} h)", flush=True)
-    x_c24_val = random_windows(val_p, VAL_K, rng)
+    people = SOURCE.split(seed)
+    test_acc = [SOURCE.signal(p) for p in people.held_out]
+    print(f"seed {seed}: C24 train {len(people.train)}, val {len(people.validation)}, test {len(people.held_out)} "
+          f"participants ({sum(len(a) for a in test_acc) / FS / 3600:.0f} h)", flush=True)
+    x_c24_val = encode(SOURCE.windows(people.validation, VAL_K, seed, "validation"))
     ones = lambda n: np.ones(n, np.float32)  # noqa: E731
     rows, curves = [], {}
     out = REPORTS / "negatives"
@@ -144,9 +112,10 @@ def run(seed: int) -> None:
         row, cv = evaluate(net, "real", x, y, test, va, thr, test_acc)
         rows.append({"seed": seed, "fold": ds, **row})
         curves.update({f"{ds}|real|{k}": v for k, v in cv.items()})
-        xc_rand = random_windows(fit_p, RANDOM_K, rng)
+        xc_rand = encode(SOURCE.windows(people.train, RANDOM_K, seed, "train", ds))
         n_mined = round(RANDOM_K * MINED_FRACTION)
-        xc_mix = np.concatenate([random_windows(fit_p, RANDOM_K - n_mined, rng), mined_windows(net, fit_p, n_mined)])
+        xc_mix = encode(np.concatenate([SOURCE.windows(people.train, RANDOM_K - n_mined, seed, "mined-random", ds),
+                                        mined_windows(net, people.train, n_mined)]))
         del net
         xvc = np.concatenate([xv, x_c24_val])
         yvc = np.concatenate([yv, np.zeros(len(x_c24_val), np.int64)])
@@ -231,19 +200,11 @@ def report() -> None:
 
 
 # ------------------------------------------------------------------------ final-model analysis
-def test_pids(prep: pd.DataFrame) -> list[str]:
-    """Held-out Capture-24 people (never trained on), usable ones only."""
-    return sorted(p for p in prep[prep.excluded.isna()].pid if int(p[1:]) > 100)
-
-
 def c24_negatives(seed: int) -> tuple[np.ndarray, np.ndarray]:
     """(training, validation) random Capture-24 windows for the final models (people P001-P100)."""
-    prep = pd.read_csv(OUT / "prepare_log.csv")
-    train_pool = sorted(p for p in prep[prep.excluded.isna()].pid if int(p[1:]) <= 100)
-    rng = np.random.default_rng(seed + 321)
-    val_p = sorted(rng.choice(train_pool, size=max(1, round(0.2 * len(train_pool))), replace=False))
-    fit_p = [p for p in train_pool if p not in val_p]
-    return random_windows(fit_p, RANDOM_K, rng), random_windows(val_p, VAL_K, rng)
+    people = SOURCE.split(seed)
+    return (SOURCE.windows(people.train, RANDOM_K, seed, "train", "final"),
+            SOURCE.windows(people.validation, VAL_K, seed, "validation"))
 
 
 def final(seeds: int = 3) -> None:
@@ -253,8 +214,8 @@ def final(seeds: int = 3) -> None:
     from .freeliving import RULES
 
     F.run(seeds, negatives=True)
-    prep = pd.read_csv(OUT / "prepare_log.csv")
-    test = test_pids(prep)
+    prep = SOURCE.log()
+    test = SOURCE.split(0).held_out
     roots = {"without Capture-24 negatives": OUT, "with Capture-24 negatives (c24-random)": OUT / "c24random"}
     out = REPORTS / "freeliving_c24random"
     rng = np.random.default_rng(0)
@@ -331,25 +292,20 @@ def scale(seed: int, ks: tuple[int, ...] = SCALE_KS) -> None:
     y = meta.label.to_numpy().astype(np.int64)
     x = M.make_inputs(X, "acc")
     aug = Augment()
-    prep = pd.read_csv(OUT / "prepare_log.csv")
-    pids = sorted(prep[prep.excluded.isna()].pid)
-    train_pool = [p for p in pids if int(p[1:]) <= 100]
-    test_acc = [load_acc(p) for p in test_pids(prep)]
-    rng = np.random.default_rng(seed + 321)  # same draw order as run(): identical validation people
-    val_p = sorted(rng.choice(train_pool, size=max(1, round(0.2 * len(train_pool))), replace=False))
-    fit_p = [p for p in train_pool if p not in val_p]
-    x_c24_val = random_windows(val_p, VAL_K, rng)
+    people = SOURCE.split(seed)
+    test_acc = [SOURCE.signal(p) for p in people.held_out]
+    x_c24_val = encode(SOURCE.windows(people.validation, VAL_K, seed, "validation"))
     out = REPORTS / "negatives" / "scale"
     out.mkdir(parents=True, exist_ok=True)
     for k in ks:
-        for fi, ds in enumerate(sorted(meta.dataset.unique())):
+        for ds in sorted(meta.dataset.unique()):
             f = out / f"seed{seed}_K{k}_{ds}.csv"
             if f.exists():
                 continue
             test = np.where(meta.dataset == ds)[0]
             tr, va = split_validation(meta, np.where(meta.dataset != ds)[0], seed)
             xv, yv = x[va], y[va]
-            xc = random_windows(fit_p, k, np.random.default_rng(seed * 1000 + k + fi))
+            xc = encode(SOURCE.windows(people.train, k, seed, "train", ds))
             xt = np.concatenate([x[tr], xc])
             yt = np.concatenate([y[tr], np.zeros(len(xc), np.int64)])
             del xc
@@ -394,12 +350,13 @@ def scale_report() -> None:
     names = {"auroc": "AUROC", "ap": "AUPRC", "fa_h_at_95sens_oracle": "lab oracle FA/h", "sensitivity": "lab sens @val thr",
              "false_alarms_per_h": "lab FA/h @val thr", "fl_events_per_day_at_val_thr": "free-living alarms/day @val thr",
              "fl_events_per_day_at_95sens": "free-living alarms/day @95% sens", **{f"sens_at_{b}_per_day": f"sens @{b}/day" for b in BUDGETS}}
-    n_fit = train_pids_count()
+    split = SOURCE.split(0)
+    n_fit = len(split.train), len(split.validation)
     L = ["# More Capture-24 negatives: dose-response\n"]
     L.append(f"Seeds: {len(seeds)} ({seeds}). Leave-one-fall-dataset-out, accel-only augmented CNN; random Capture-24 windows "
              f"per training person (about 47,000 windows exist per person; training people: {n_fit[0]}, validation people: {n_fit[1]}; "
              "held-out people P101-P151, never trained on). K=0 and K=1500 are the control and `c24-random` from "
-             "`reports/negatives/report.md` (same seeds and splits; windows drawn with a different random stream). "
+             "`reports/negatives/report.md` (same seeds and splits). "
              "Cells: macro over the four held-out fall datasets, mean ± std over seeds. Free-living columns use the "
              "held-out people. Sensitivity at a budget is threshold-free (see `negatives.py`). Fall windows are simulated.\n")
     L.append("## Macro over held-out fall datasets\n")
@@ -429,10 +386,3 @@ def scale_report() -> None:
         L.append("")
     (out / "scale_report.md").write_text("\n".join(L))
     print(f"report: {out / 'scale_report.md'}")
-
-
-def train_pids_count() -> tuple[int, int]:
-    prep = pd.read_csv(OUT / "prepare_log.csv")
-    n = sum(int(p[1:]) <= 100 for p in prep[prep.excluded.isna()].pid)
-    v = max(1, round(0.2 * n))
-    return n - v, v

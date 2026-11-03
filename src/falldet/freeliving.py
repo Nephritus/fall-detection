@@ -8,17 +8,13 @@ Steps (each cached): ``prepare`` Capture-24 CSVs -> 25 Hz canonical-frame signal
 ``fit`` final augmented accel-only CNNs on all four fall datasets with the two threshold rules;
 ``score`` every window; ``report``.
 
-Mounting: each participant is rotated so the mean specific force while walking points at the
-right-wrist reference, then mirrored to the left-wrist convention (as for Erciyes/UMAFall). Capture-24
-records the *dominant* wrist only, so the side is assumed right [UNVERIFIED]. Free-living walking
-includes arm swing, so the walking mean has norm ~0.7 g (lab data: 0.9-1.0 g); only its direction is
-used and participants below MIN_WALK_NORM_G are excluded.
+Mounting: each participant is aligned from walking and mirrored to the left-wrist convention by the
+Capture-24 source (``capture24.py``), which also owns the person split and activity labels.
 """
 
 from __future__ import annotations
 
 import time
-from concurrent.futures import ProcessPoolExecutor
 
 import numpy as np
 import pandas as pd
@@ -28,84 +24,23 @@ from . import model as M
 from .alarms import REFRACTORY_S, FalseAlarms, per_day_ci
 from .augment import Augment
 from .baseline import choose_threshold, split_validation
-from .canonical import ACC_CLIP_G, FS, align_mounting, to_grid
+from .canonical import FS
+from .capture24 import Capture24
 from .cli import PROCESSED, RAW, REPORTS
 from .threshold import balanced_threshold
 from .windows import STRIDE_S, WIN_S
 
-SRC_FS = 100
-LABEL_COL = "label:WillettsSpecific2018"
-LABELS = ["sleep", "sitting", "standing", "walking", "household-chores", "manual-work",
-          "mixed-activity", "sports", "vehicle", "bicycling"]
-UNLABELLED = 255
-MIN_WALK_S, MIN_WALK_NORM_G = 300, 0.5
 OUT = PROCESSED / "capture24"
+SOURCE = Capture24(OUT)
 RULES = ("val-slice", "lodo-pooled")
-
-
-def _resample(x: np.ndarray) -> np.ndarray:
-    """100 Hz samples -> the canonical 25 Hz grid (anti-alias filter included), as for every source."""
-    t = np.arange(len(x)) / SRC_FS
-    return to_grid(t, x, SRC_FS, np.arange(int(t[-1] * FS) + 1) / FS)
-
-
-# --------------------------------------------------------------------------------- prepare
-def _prepare_one(args) -> dict:
-    path, mapping = args
-    pid = path.name.split(".")[0]
-    t = pd.read_csv(path, usecols=["x", "y", "z", "annotation"],
-                    dtype={"x": "f4", "y": "f4", "z": "f4", "annotation": "category"})
-    cats = t.annotation.cat.categories
-    code_of = np.array([LABELS.index(mapping[c]) if c in mapping and mapping[c] in LABELS else UNLABELLED
-                        for c in cats], dtype=np.uint8)
-    codes = t.annotation.cat.codes.to_numpy()
-    lab = np.where(codes >= 0, code_of[np.maximum(codes, 0)], UNLABELLED).astype(np.uint8)
-    xyz = t[["x", "y", "z"]].to_numpy(np.float64)
-    del t
-    info = {"pid": pid, "hours": len(xyz) / SRC_FS / 3600}
-    walk = xyz[lab == LABELS.index("walking")]
-    info["walk_s"] = len(walk) / SRC_FS
-    if info["walk_s"] < MIN_WALK_S:
-        return {**info, "excluded": f"walking {info['walk_s']:.0f} s"}
-    al = align_mounting(walk, "right", min_norm_g=MIN_WALK_NORM_G)  # free-living arm swing: see docstring
-    info["walk_norm"] = al.norm_g
-    if al.excluded:
-        return {**info, "excluded": f"walking mean norm {info['walk_norm']:.2f} g"}
-    acc = np.clip(al.apply(_resample(xyz))[0], -ACC_CLIP_G, ACC_CLIP_G).astype(np.float32)
-    np.savez(OUT / f"{pid}.npz", acc=acc, lab=lab[:: SRC_FS // FS][: len(acc)])
-    info["walk_axis_std"] = al.apply(_resample(walk))[0].std(axis=0).round(3).tolist()
-    return info
-
-
-def prepare(workers: int = 3) -> pd.DataFrame:
-    OUT.mkdir(parents=True, exist_ok=True)
-    log = OUT / "prepare_log.csv"
-    if log.exists():
-        return pd.read_csv(log)
-    base = RAW / "capture24" / "capture24"
-    if not base.is_dir():
-        raise FileNotFoundError(base)
-    d = pd.read_csv(base / "annotation-label-dictionary.csv", index_col=0, dtype=str)
-    mapping = d[LABEL_COL].to_dict()
-    files = sorted(base.glob("P[0-9][0-9][0-9].csv.gz"))
-    t0 = time.time()
-    with ProcessPoolExecutor(workers) as ex:
-        rows = []
-        for i, r in enumerate(ex.map(_prepare_one, [(f, mapping) for f in files])):
-            rows.append(r)
-            if i % 10 == 0:
-                print(f"[prepare] {i + 1}/{len(files)} ({time.time() - t0:.0f}s)", flush=True)
-    df = pd.DataFrame(rows)
-    df.to_csv(log, index=False)
-    return df
 
 
 # -------------------------------------------------------------------------------------- fit
 def fit_models(seeds: int, root=OUT, extra=None) -> pd.DataFrame:
     """Final models (all four fall datasets) and thresholds per seed; weights saved to ``root``/models.
 
-    ``extra(seed)`` optionally returns (training, validation) negative windows (model inputs) that are
-    added to every fit, final and nested (see ``negatives.c24_negatives``)."""
+    ``extra(seed)`` optionally returns (training, validation) canonical accelerometer windows of ADL that
+    are added to every fit, final and nested (see ``negatives.c24_negatives``)."""
     (root / "models").mkdir(parents=True, exist_ok=True)
     (root / "fall_scores").mkdir(exist_ok=True)
     tp = root / "thresholds.csv"
@@ -120,7 +55,7 @@ def fit_models(seeds: int, root=OUT, extra=None) -> pd.DataFrame:
     ones = lambda n: np.ones(n, np.float32)  # noqa: E731
     rows, t0 = [], time.time()
     for seed in range(seeds):
-        xn, xnv = extra(seed) if extra else (x[:0], x[:0])
+        xn, xnv = (M.make_inputs(w, "acc") for w in extra(seed)) if extra else (x[:0], x[:0])
 
         def fit(tr_idx, va_idx):
             xt = np.concatenate([x[tr_idx], xn])
@@ -182,7 +117,7 @@ def score_all(seeds: int, pids: list[str], root=OUT) -> None:
         f = sp / f"{pid}.npy"
         if f.exists() and np.load(f, mmap_mode="r").shape[0] >= seeds:
             continue
-        acc = np.load(OUT / f"{pid}.npz")["acc"]
+        acc = SOURCE.signal(pid)
         np.save(f, np.stack([score_signal(n, acc) for n in nets]).astype(np.float32))
         if i % 20 == 0:
             print(f"[score] {i + 1}/{len(pids)} ({time.time() - t0:.0f}s)", flush=True)
@@ -209,7 +144,7 @@ def mounting_sensitivity(pids: list[str], thr: pd.DataFrame, seeds: int, refract
     sub = pids[:: max(1, len(pids) // 40)]  # ~40 participants keep this affordable
     rows = []
     for pid in sub:
-        acc0 = np.load(OUT / f"{pid}.npz")["acc"]
+        acc0 = SOURCE.signal(pid)
         for name, (deg, unmirror) in MOUNTINGS.items():
             a = acc0 * np.array([1.0, -1.0, 1.0], np.float32) if unmirror else acc0
             a = np.ascontiguousarray(a @ _roll(deg).T)
@@ -244,11 +179,8 @@ def tradeoff(pids: list[str], seeds: int, refractory: float, root=OUT) -> pd.Dat
 def alarm_table(pids: list[str], thr: pd.DataFrame, seeds: int, refractory: float, root=OUT) -> pd.DataFrame:
     """One row per (seed, rule, participant, label): hours of exposure, alarm events (labelled by the
     window that opened the event) and fired windows."""
-    win, stride = round(WIN_S * FS), round(STRIDE_S * FS)
-    names = {**dict(enumerate(LABELS)), UNLABELLED: "unlabelled"}
     sc = {p: np.load(root / "scores" / f"{p}.npy") for p in pids}
-    centre = {p: np.load(OUT / f"{p}.npz")["lab"][np.arange(sc[p].shape[1]) * stride + win // 2] for p in pids}
-    labels = [np.array([names[int(c)] for c in centre[p]]) for p in pids]
+    labels = [SOURCE.window_labels(p)[: sc[p].shape[1]] for p in pids]
     rows = []
     for seed in range(seeds):
         fa = FalseAlarms.from_window_scores([sc[p][seed] for p in pids], labels, refractory)
@@ -263,13 +195,12 @@ def run(seeds: int = 5, negatives: bool = False) -> None:
     """Free-living report. ``negatives``: final models also train on Capture-24 negatives (people
     P001-P100), so only the held-out people P101-P151 are scored."""
     t0 = time.time()
-    prep = prepare()
-    ok = prep[prep.excluded.isna()] if "excluded" in prep else prep
-    pids, root, extra, name = list(ok.pid), OUT, None, "freeliving"
+    prep = SOURCE.prepare(RAW)
+    pids, root, extra, name = SOURCE.people(), OUT, None, "freeliving"
     if negatives:
-        from .negatives import c24_negatives, test_pids
+        from .negatives import c24_negatives
 
-        pids, root, extra, name = test_pids(prep), OUT / "c24random", c24_negatives, "freeliving_c24random"
+        pids, root, extra, name = SOURCE.split(0).held_out, OUT / "c24random", c24_negatives, "freeliving_c24random"
         prep = prep[prep.pid.map(lambda p: int(p[1:])) > 100]
     thr = fit_models(seeds, root, extra)
     score_all(seeds, pids, root)
