@@ -2,7 +2,7 @@
 
 Seeds: 3. 48 of 51 participants used (1226 h of wrist accelerometer, about a day each, including sleep); each 4 s window (2 s stride) is scored by the final augmented accel-only CNN trained on all four fall datasets plus random Capture-24 windows of people P001-P100 as negatives (only the held-out people P101-P151 are scored here, so no one in this report was trained on). Alarm events merge fired windows with a 30 s refractory period. **Rates are alarm events, not windows. Nothing here is assumed: the exposure is measured.** Rule `val-slice` = 95% sensitivity on a validation slice of the training data; `lodo-pooled` = nested leave-one-dataset-out (see `threshold.py`). The threshold belongs to one operating point each; sensitivity on real falls is unknown (the fall datasets are simulated; see section 5 and `reports/threshold_augmented/report.md` for fall sensitivity of each rule).
 
-**Limits.** (1) The people are 151 adults in Oxford wearing an Axivity AX3 on the *dominant* wrist, not a smartwatch; the side is not recorded, so I assumed right and mirrored it, and the mounting is aligned per person from walking (direction only, norm ~0.7 g because of arm swing). (2) Only about 66% of the hours are labelled; the rest is shown as `unlabelled`. (3) A fall or near-fall that really happened would count as a false alarm here, since nothing marks it. (4) The AX3 samples at 100 Hz and was low-passed and decimated to 25 Hz by the same code path as the real datasets. (5) 151 people × one day: day-to-day variation within a person is not measured.
+**Limits.** (1) The people are 151 adults in Oxford wearing an Axivity AX3 on the *dominant* wrist, not a smartwatch; the side is not recorded, so I assumed right and mirrored it, and the mounting is aligned per person from walking (direction only, norm ~0.7 g because of arm swing). (2) Only about 66% of the hours are labelled; the rest is shown as `unlabelled`. (3) A fall or near-fall that really happened would count as a false alarm here, since nothing marks it. (4) The AX3 samples at 100 Hz and was low-passed with the same anti-alias filter as the real datasets and decimated to 25 Hz. (5) 151 people × one day: day-to-day variation within a person is not measured.
 
 Excluded participants: 3 (P112: walking mean norm 0.20 g; P135: walking mean norm 0.25 g; P136: walking mean norm 0.22 g).
 
@@ -12,8 +12,8 @@ Events per 24 h of wear, pooled over all participants and hours (labelled and un
 
 | rule | events / 24 h (95% CI) | median participant | p90 participant | participants with ≥1 alarm per day | participants with 0 alarms |
 |---|---|---|---|---|---|
-| val-slice | 35.5 (29.3–41.9) | 31.1 | 70.1 | 100% | 0% |
-| lodo-pooled | 114.2 (98.6–130.4) | 103.4 | 195.9 | 100% | 0% |
+| val-slice | 35.1 (29.0–41.4) | 30.2 | 68.6 | 100% | 0% |
+| lodo-pooled | 112.5 (97.4–128.2) | 102.3 | 192.4 | 100% | 0% |
 
 ## 2. Where the alarms come from
 
@@ -23,15 +23,15 @@ Rate per hour of each labelled activity (pooled over participants, seed-averaged
 
 | activity | hours | share of wear time | events/h | share of alarm events | windows/h (before merging) |
 |---|---|---|---|---|---|
-| unlabelled | 417 | 34% | 1.83 | 42% | 3.67 |
-| walking | 59 | 5% | 3.70 | 12% | 6.02 |
-| household-chores | 61 | 5% | 3.25 | 11% | 5.59 |
+| unlabelled | 417 | 34% | 1.81 | 42% | 3.67 |
+| walking | 59 | 5% | 3.63 | 12% | 6.02 |
+| household-chores | 61 | 5% | 3.19 | 11% | 5.59 |
 | sitting | 271 | 22% | 0.65 | 10% | 1.03 |
 | sports | 7 | 1% | 19.22 | 8% | 51.88 |
-| mixed-activity | 44 | 4% | 2.58 | 6% | 4.69 |
-| standing | 25 | 2% | 2.65 | 4% | 4.18 |
-| manual-work | 14 | 1% | 4.68 | 4% | 6.96 |
-| vehicle | 28 | 2% | 1.11 | 2% | 1.61 |
+| mixed-activity | 44 | 4% | 2.56 | 6% | 4.69 |
+| manual-work | 14 | 1% | 4.66 | 4% | 6.96 |
+| standing | 25 | 2% | 2.61 | 4% | 4.18 |
+| vehicle | 28 | 2% | 1.09 | 2% | 1.61 |
 | sleep | 292 | 24% | 0.10 | 2% | 0.13 |
 | bicycling | 7 | 1% | 1.89 | 1% | 3.23 |
 
@@ -39,24 +39,24 @@ Rate per hour of each labelled activity (pooled over participants, seed-averaged
 
 | activity | hours | share of wear time | events/h | share of alarm events | windows/h (before merging) |
 |---|---|---|---|---|---|
-| unlabelled | 417 | 34% | 5.77 | 41% | 12.98 |
-| sitting | 271 | 22% | 2.79 | 13% | 4.76 |
-| walking | 59 | 5% | 11.65 | 12% | 22.03 |
-| household-chores | 61 | 5% | 9.48 | 10% | 17.95 |
-| mixed-activity | 44 | 4% | 8.43 | 6% | 16.58 |
-| sports | 7 | 1% | 39.83 | 5% | 144.24 |
-| manual-work | 14 | 1% | 16.84 | 4% | 31.56 |
-| standing | 25 | 2% | 8.33 | 4% | 16.18 |
+| unlabelled | 417 | 34% | 5.67 | 41% | 12.98 |
+| sitting | 271 | 22% | 2.77 | 13% | 4.76 |
+| walking | 59 | 5% | 11.41 | 12% | 22.03 |
+| household-chores | 61 | 5% | 9.32 | 10% | 17.95 |
+| mixed-activity | 44 | 4% | 8.33 | 6% | 16.58 |
+| sports | 7 | 1% | 39.78 | 5% | 144.24 |
+| manual-work | 14 | 1% | 16.72 | 4% | 31.56 |
+| standing | 25 | 2% | 8.09 | 4% | 16.18 |
 | sleep | 292 | 24% | 0.47 | 2% | 0.69 |
-| vehicle | 28 | 2% | 4.21 | 2% | 7.34 |
-| bicycling | 7 | 1% | 6.27 | 1% | 11.04 |
+| vehicle | 28 | 2% | 4.06 | 2% | 7.34 |
+| bicycling | 7 | 1% | 6.22 | 1% | 11.04 |
 
 ## 3. Day versus night
 
 | rule | awake labelled hours: events/h | sleep: events/h | unlabelled: events/h |
 |---|---|---|---|
-| val-slice | 1.98 | 0.098 | 1.83 |
-| lodo-pooled | 6.37 | 0.467 | 5.77 |
+| val-slice | 1.96 | 0.098 | 1.81 |
+| lodo-pooled | 6.28 | 0.467 | 5.67 |
 
 ## 4. How sensitive is this to my mounting assumptions?
 
@@ -89,8 +89,8 @@ Same threshold applied to two things: alarm events per 24 h of Capture-24 wear (
 | 0.995 | 18.1 ± 1.7 | 0.764 ± 0.023 |
 | 0.999 | 11.4 ± 1.0 | 0.669 ± 0.032 |
 
-## 6. Comparison with the assumed-budget estimate (`alarms.py`)
+## 6. Comparison with the assumed-budget estimate
 
-`reports/alarms/report.md` estimated 26 (val-slice) and 155 (lodo-pooled) alarms for a typical day, and 55 / 210 for an active day, from lab clips and assumed time budgets. The measured rates above replace that assumption.
+`reports/alarms/report.md` estimated alarms per day from lab clips and assumed activity time budgets (`budget_estimate.py`). The measured rates above replace that assumption.
 
-Weights: threshold levels per seed are in `data/processed/capture24/thresholds.csv`. Runtime of the last report step: 0.0 min (fits and scoring are cached).
+Threshold levels per seed are in `data/processed/capture24/c24random/thresholds.csv`. Runtime of the last report step: 0.0 min (fits and scoring are cached).

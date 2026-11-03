@@ -76,8 +76,8 @@
     <li><b>Biggest wins, in order:</b> more source datasets, augmentation (mirror, rotation, time stretch), and real everyday movement as extra
         <em>negative</em> training data (Capture-24). The lab false-alarm metric fell from 114 to 51 FA/h with augmentation; free-living alarms
         per day fell by about half with Capture-24 negatives.</li>
-    <li><b>Measured free-living false alarms</b> (Capture-24, held-out people): <b>36 per day</b> at the current threshold,
-        <b>114 per day</b> at the threshold that catches 95% of simulated falls. A usable product needs a few per week
+    <li><b>Measured free-living false alarms</b> (Capture-24, held-out people): <b>35 per day</b> at the current threshold,
+        <b>112 per day</b> at the threshold that catches 95% of simulated falls. A usable product needs a few per week
         [my assumption, not checked against vendor specs].</li>
     <li><b>Latest:</b> more negatives per person (3&times; and 10&times;) did <em>not</em> help beyond the 1,500-window setting. A second-stage confirmation
         (context 1 s before to 4 s after the impact) <b>halves</b> alarms again, <b>35 &rarr; 17 per day</b>, for about 5 points of per-recording fall sensitivity (0.89 &rarr; 0.85).
@@ -190,7 +190,7 @@ Recommendation: keep real data plus augmentation; revisit synthetic data only wi
 <ol>
   <li><b>Event counting</b> (<code>reports/alarms</code>): fired windows merged with a 30 s refractory period. About 40% of the old <code>lodo-pooled</code> replay number was the same alarm counted repeatedly (44.8 &rarr; 25.4 events/h).
       A first daily estimate from assumed activity time budgets gave 26 (<code>val-slice</code>) and 155 (<code>lodo-pooled</code>) alarms/day. This was scenario arithmetic, not measurement.</li>
-  <li><b>Measured on Capture-24</b> (<code>reports/freeliving</code>, 140 people, 5 seeds): <b>71</b> alarms/day (<code>val-slice</code>, 95% CI 63&ndash;79) and <b>193</b> (<code>lodo-pooled</code>, 177&ndash;210); every person had at least one alarm per day.
+  <li><b>Measured on Capture-24</b> (<code>reports/freeliving</code>, 140 people, 5 seeds): <b>70</b> alarms/day (<code>val-slice</code>, 95% CI 62&ndash;78) and <b>189</b> (<code>lodo-pooled</code>, 173&ndash;206); every person had at least one alarm per day.
       Free-living walking fires about 8 events/h against 1&ndash;3 in lab clips; sleep is quiet (0.18 events/h). The assumed budget had underestimated the current rule by about 2.7×.</li>
   <li><b>Mounting check:</b> rolling the forearm axis by ±30&ndash;60° or assuming the other wrist moved the rate only mildly (70 &rarr; 73&ndash;81 for <code>val-slice</code>), so the numbers do not hinge on my alignment assumption, though 90&ndash;180° rolls raise them to 89&ndash;99.</li>
 </ol>
@@ -213,23 +213,23 @@ my reading is that the hardest everyday windows look like falls, so training aga
 <div class="bars">
   <div class="note">Alarm events per 24 h of wear, <code>val-slice</code> rule</div>
   <div class="bar"><span>Assumed time budget (lab clips)</span><span class="track"><span class="fill alt" style="display:block;width:12%"></span></span><span class="v">26</span></div>
-  <div class="bar"><span>Measured, no negatives</span><span class="track"><span class="fill lose" style="display:block;width:35%"></span></span><span class="v">76</span></div>
-  <div class="bar"><span>Measured, with Capture-24 negatives</span><span class="track"><span class="fill win" style="display:block;width:17%"></span></span><span class="v">36</span></div>
+  <div class="bar"><span>Measured, no negatives</span><span class="track"><span class="fill lose" style="display:block;width:35%"></span></span><span class="v">75</span></div>
+  <div class="bar"><span>Measured, with Capture-24 negatives</span><span class="track"><span class="fill win" style="display:block;width:17%"></span></span><span class="v">35</span></div>
   <div class="note" style="margin-top:.6rem">Alarm events per 24 h of wear, <code>lodo-pooled</code> rule (≈ 0.95 fall sensitivity)</div>
-  <div class="bar"><span>Assumed time budget (lab clips)</span><span class="track"><span class="fill alt" style="display:block;width:71%"></span></span><span class="v">155</span></div>
-  <div class="bar"><span>Measured, no negatives</span><span class="track"><span class="fill lose" style="display:block;width:100%"></span></span><span class="v">217</span></div>
-  <div class="bar"><span>Measured, with Capture-24 negatives</span><span class="track"><span class="fill win" style="display:block;width:53%"></span></span><span class="v">114</span></div>
+  <div class="bar"><span>Assumed time budget (lab clips)</span><span class="track"><span class="fill alt" style="display:block;width:73%"></span></span><span class="v">155</span></div>
+  <div class="bar"><span>Measured, no negatives</span><span class="track"><span class="fill lose" style="display:block;width:100%"></span></span><span class="v">212</span></div>
+  <div class="bar"><span>Measured, with Capture-24 negatives</span><span class="track"><span class="fill win" style="display:block;width:53%"></span></span><span class="v">112</span></div>
 </div>
 <div class="tablewrap"><table>
 <thead><tr><th>Model</th><th>Rule</th><th class="n">Alarms/day (95% CI over people)</th><th class="n">Median / p90 person</th><th class="n">Fall-window sensitivity</th></tr></thead>
 <tbody>
-<tr><td>without negatives</td><td><code>val-slice</code></td><td class="n">76 (64&ndash;88)</td><td class="n">68 / 140</td><td class="n">0.79 ± 0.10</td></tr>
-<tr><td>with negatives</td><td><code>val-slice</code></td><td class="n good">36 (30&ndash;42)</td><td class="n">31 / 70</td><td class="n">0.85 ± 0.03</td></tr>
-<tr><td>without negatives</td><td><code>lodo-pooled</code></td><td class="n">217 (191&ndash;245)</td><td class="n">205 / 340</td><td class="n">0.95</td></tr>
-<tr><td>with negatives</td><td><code>lodo-pooled</code></td><td class="n good">114 (99&ndash;130)</td><td class="n">103 / 196</td><td class="n">0.95</td></tr>
+<tr><td>without negatives</td><td><code>val-slice</code></td><td class="n">75 (63&ndash;87)</td><td class="n">67 / 138</td><td class="n">0.79 ± 0.10</td></tr>
+<tr><td>with negatives</td><td><code>val-slice</code></td><td class="n good">35 (29&ndash;41)</td><td class="n">30 / 69</td><td class="n">0.85 ± 0.03</td></tr>
+<tr><td>without negatives</td><td><code>lodo-pooled</code></td><td class="n">212 (186&ndash;239)</td><td class="n">202 / 332</td><td class="n">0.95</td></tr>
+<tr><td>with negatives</td><td><code>lodo-pooled</code></td><td class="n good">112 (98&ndash;128)</td><td class="n">102 / 192</td><td class="n">0.95</td></tr>
 </tbody></table></div>
 <p>At the same ~0.87 fall sensitivity the model with negatives needs about 38 alarms/day against about 110 without. The best low-alarm point reached is about 11 alarms/day at 0.67 sensitivity (threshold 0.999).
-Remaining alarms (events/h, <code>val-slice</code>): walking 3.7, household chores 3.3, manual work 4.7, sports 19, sitting 0.65, sleep 0.10.
+Remaining alarms (events/h, <code>val-slice</code>): walking 3.6, household chores 3.2, manual work 4.7, sports 19, sitting 0.65, sleep 0.10.
 The confidence intervals cover only sampling of people; seed-to-seed spread is larger (for example 26&ndash;53 alarms/day for the negatives model).</p>
 
 <h3>4.9 More negatives per person (<code>reports/negatives/scale_report.md</code>)</h3>

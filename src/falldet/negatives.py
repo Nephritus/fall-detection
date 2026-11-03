@@ -31,7 +31,7 @@ import pandas as pd
 import torch
 
 from . import model as M
-from .alarms import REFRACTORY_S, count_events
+from .alarms import REFRACTORY_S, FalseAlarms, per_day_ci, sensitivity_at_budget
 from .augment import Augment
 from .baseline import choose_threshold, metrics, split_validation
 from .canonical import FS
@@ -44,7 +44,6 @@ RANDOM_K = 1500  # Capture-24 windows added per training participant
 MINED_FRACTION = 2 / 3
 VAL_K = 800  # random windows per Capture-24 validation participant
 BUDGETS = (10, 25, 50, 100)  # alarm events per day
-FIRE_FRACTIONS = np.logspace(-5, -0.8, 40)
 CONDITIONS = ("real", "c24-random", "c24-mined")
 
 
@@ -95,30 +94,13 @@ def mined_windows(net: M.FallCNN, pids: list[str], k: int, sep: int = 3) -> np.n
 
 
 # ------------------------------------------------------------------------------ free-living
-def events_per_day(scores: list[np.ndarray], thr: float, hours: float) -> float:
-    ends = [(np.arange(len(s)) * STRIDE + WIN) / FS for s in scores]
-    ev = sum(count_events(e[s >= thr], REFRACTORY_S) for s, e in zip(scores, ends))
-    return ev / hours * 24
-
-
 def free_living(scores: list[np.ndarray], fall_scores: np.ndarray, val_thr: float):
     """Row of free-living numbers plus the alarm curve (thresholds descending, events/day ascending)."""
-    hours = sum(len(s) for s in scores) * STRIDE_S / 3600
-    pooled = np.concatenate(scores)
-    grid = np.quantile(pooled, 1 - FIRE_FRACTIONS)  # descending thresholds
-    ev = np.array([events_per_day(scores, t, hours) for t in grid])
+    fa = FalseAlarms.from_window_scores(scores)
+    grid, ev = fa.curve()
     t95 = np.quantile(fall_scores, 0.05, method="lower")
-    row = {"fl_events_per_day_at_val_thr": events_per_day(scores, val_thr, hours),
-           "fl_events_per_day_at_95sens": events_per_day(scores, t95, hours)}
+    row = {"fl_events_per_day_at_val_thr": fa.per_day(val_thr), "fl_events_per_day_at_95sens": fa.per_day(t95)}
     return row, {"grid": grid, "ev": ev, "falls": fall_scores}
-
-
-def budget_sens(grid: np.ndarray, ev: np.ndarray, falls: np.ndarray, budget: float) -> float:
-    """Fall-window sensitivity at the lowest threshold whose free-living alarms stay within ``budget``/day."""
-    ev = np.maximum.accumulate(ev)  # alarms can only grow as the threshold drops
-    ok = np.where(ev <= budget)[0]
-    return float((falls >= grid[ok[-1]]).mean()) if len(ok) else 0.0
-
 
 # --------------------------------------------------------------------------------- driver
 def evaluate(net, cond, x, y, test_idx, va, val_thr, test_acc):
@@ -197,7 +179,7 @@ def report() -> None:
         cv = np.load(out / f"curves_seed{r.seed}.npz")
         k = f"{r.fold}|{r.cond}|"
         for b in BUDGETS:
-            sens[f"sens_at_{b}_per_day"].append(budget_sens(cv[k + "grid"], cv[k + "ev"], cv[k + "falls"], b))
+            sens[f"sens_at_{b}_per_day"].append(sensitivity_at_budget(cv[k + "grid"], cv[k + "ev"], cv[k + "falls"], b))
     df = df.assign(**sens)
     seeds = df.seed.nunique()
     per = df.groupby(["cond", "seed"])[COLS].mean()  # macro over held-out fall datasets
@@ -268,7 +250,7 @@ def final(seeds: int = 3) -> None:
     """Final models with Capture-24 negatives: free-living report plus a comparison with the models
     trained without them, on the same held-out people."""
     from . import freeliving as F
-    from .freeliving import RULES, _wilson_ci
+    from .freeliving import RULES
 
     F.run(seeds, negatives=True)
     prep = pd.read_csv(OUT / "prepare_log.csv")
@@ -300,7 +282,7 @@ def final(seeds: int = 3) -> None:
             rates, cis, sens = [], [], []
             for s, gg in pp.groupby("seed"):
                 rates.append(gg.events.sum() / gg.hours.sum() * 24)
-                cis.append(_wilson_ci(gg.events.to_numpy(float), gg.hours.to_numpy(float), rng) * 24)
+                cis.append(per_day_ci(gg.events.to_numpy(), gg.hours.to_numpy(), rng))
                 t = thrs[name][(thrs[name].seed == s) & (thrs[name].rule == rule)].threshold.iloc[0]
                 fs = np.load(root / "fall_scores" / f"seed{s}.npz")
                 sens.append(np.mean([(fs[k] >= t).mean() for k in fs.files]))
@@ -392,7 +374,7 @@ def scale_report() -> None:
         cv = np.load(f.with_suffix(".npz"))
         d = r.to_dict()
         for b in BUDGETS:
-            d[f"sens_at_{b}_per_day"] = budget_sens(cv["grid"], cv["ev"], cv["falls"], b)
+            d[f"sens_at_{b}_per_day"] = sensitivity_at_budget(cv["grid"], cv["ev"], cv["falls"], b)
         rows.append(d)
     new = pd.DataFrame(rows)
     old = pd.concat([pd.read_csv(f) for f in sorted(out.glob("metrics_seed*.csv"))])
@@ -401,7 +383,7 @@ def scale_report() -> None:
         cv = np.load(out / f"curves_seed{r.seed}.npz")
         k = f"{r.fold}|{r.cond}|"
         for b in BUDGETS:
-            sens[f"sens_at_{b}_per_day"].append(budget_sens(cv[k + "grid"], cv[k + "ev"], cv[k + "falls"], b))
+            sens[f"sens_at_{b}_per_day"].append(sensitivity_at_budget(cv[k + "grid"], cv[k + "ev"], cv[k + "falls"], b))
     old = old.assign(**sens)
     old = old[old.cond.isin(["real", "c24-random"])].assign(K=lambda d: np.where(d.cond == "real", 0, RANDOM_K))
     df = pd.concat([old, new.assign(K=new.K.astype(int))])

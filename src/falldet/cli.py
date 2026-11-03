@@ -126,7 +126,7 @@ def main() -> None:
 
         freeliving(args.seeds)
     elif args.cmd == "alarms":
-        from .alarms import run as alarms
+        from .budget_estimate import run as alarms
 
         alarms(args.seeds)
     elif args.cmd == "synthetic":

@@ -60,20 +60,20 @@ Per held-out dataset: lowest alarms/day at sensitivity 0.90 (mean over seeds):
 
 ## 4. Where the remaining alarms come from (practical rule)
 
-Events per hour of each Capture-24 activity, pooled over the held-out datasets and seeds (the 48 held-out people are scored once per fold and seed).
+Events per hour of each Capture-24 activity, pooled over the held-out datasets and seeds (the 48 held-out people are scored once per fold and seed; an alarm event belongs to the activity of the candidate that opened it).
 
 | activity | hours | stage 1 + trigger | two-stage |
 |---|---|---|---|
-| unlabelled | 417 | 1.72 | 0.82 |
-| household-chores | 61 | 2.95 | 1.81 |
-| walking | 59 | 3.48 | 1.76 |
+| unlabelled | 417 | 1.71 | 0.82 |
+| household-chores | 61 | 2.91 | 1.80 |
+| walking | 59 | 3.43 | 1.75 |
 | sitting | 271 | 0.64 | 0.35 |
-| mixed-activity | 44 | 2.49 | 1.28 |
+| mixed-activity | 44 | 2.48 | 1.28 |
 | sports | 7 | 16.48 | 6.83 |
-| standing | 25 | 2.49 | 1.54 |
-| manual-work | 14 | 4.27 | 2.10 |
+| standing | 25 | 2.43 | 1.53 |
+| manual-work | 14 | 4.23 | 2.10 |
 | sleep | 292 | 0.10 | 0.06 |
-| vehicle | 28 | 1.19 | 0.59 |
+| vehicle | 28 | 1.17 | 0.59 |
 | bicycling | 7 | 2.29 | 1.37 |
 
 Stage 2 alone, held-out falls vs held-out Capture-24 candidates: AUROC 0.981 (mean over folds and seeds).

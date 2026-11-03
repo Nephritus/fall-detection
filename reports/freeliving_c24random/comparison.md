@@ -6,12 +6,12 @@ Seeds: 3 (same seed numbers, same fall-data splits). Both models are scored on t
 
 | model | rule | alarm events / 24 h (95% CI over people) | median person | p90 person | fall-window sensitivity at this threshold |
 |---|---|---|---|---|---|
-| without Capture-24 negatives | val-slice | 75.6 (63.6-87.7) | 68.4 | 140.3 | 0.787 ± 0.099 |
-| without Capture-24 negatives | lodo-pooled | 217.3 (190.5-245.1) | 205.4 | 340.3 | 0.950 ± 0.000 |
-| with Capture-24 negatives (c24-random) | val-slice | 35.5 (29.5-41.7) | 31.1 | 70.1 | 0.851 ± 0.030 |
-| with Capture-24 negatives (c24-random) | lodo-pooled | 114.2 (98.8-130.4) | 103.4 | 195.9 | 0.950 ± 0.000 |
+| without Capture-24 negatives | val-slice | 74.6 (62.9-86.6) | 67.2 | 138.2 | 0.787 ± 0.099 |
+| without Capture-24 negatives | lodo-pooled | 212.4 (186.4-239.4) | 201.5 | 331.9 | 0.950 ± 0.000 |
+| with Capture-24 negatives (c24-random) | val-slice | 35.1 (29.2-41.2) | 30.2 | 68.6 | 0.851 ± 0.030 |
+| with Capture-24 negatives (c24-random) | lodo-pooled | 112.5 (97.5-128.4) | 102.3 | 192.4 | 0.950 ± 0.000 |
 
-Per-seed alarms/day: without Capt… val-slice: 49, 113, 64; without Capt… lodo-pooled: 170, 160, 322; with Capture… val-slice: 27, 53, 26; with Capture… lodo-pooled: 123, 99, 120
+Per-seed alarms/day: without Capt… val-slice: 49, 112, 63; without Capt… lodo-pooled: 166, 157, 314; with Capture… val-slice: 27, 53, 26; with Capture… lodo-pooled: 121, 98, 119
 
 ## 2. What each threshold costs and buys
 
@@ -35,14 +35,14 @@ The two models' scores are calibrated differently (extra negatives shift probabi
 
 | activity | hours | events/h (without) | events/h (c24-random) |
 |---|---|---|---|
-| unlabelled | 417 | 3.75 | 1.83 |
-| walking | 59 | 8.92 | 3.70 |
-| household-chores | 61 | 7.79 | 3.25 |
-| sitting | 271 | 1.31 | 0.65 |
-| mixed-activity | 44 | 6.54 | 2.58 |
+| unlabelled | 417 | 3.70 | 1.81 |
+| walking | 59 | 8.76 | 3.63 |
+| household-chores | 61 | 7.64 | 3.19 |
+| sitting | 271 | 1.30 | 0.65 |
+| mixed-activity | 44 | 6.49 | 2.56 |
 | sports | 7 | 28.20 | 19.22 |
-| manual-work | 14 | 13.22 | 4.68 |
-| standing | 25 | 4.80 | 2.65 |
-| vehicle | 28 | 2.34 | 1.11 |
+| manual-work | 14 | 13.03 | 4.66 |
+| standing | 25 | 4.70 | 2.61 |
+| vehicle | 28 | 2.30 | 1.09 |
 | sleep | 292 | 0.14 | 0.10 |
 | bicycling | 7 | 4.48 | 1.89 |

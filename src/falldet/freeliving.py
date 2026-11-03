@@ -26,7 +26,7 @@ import torch
 from scipy.signal import butter, sosfiltfilt
 
 from . import model as M
-from .alarms import REFRACTORY_S, count_events
+from .alarms import REFRACTORY_S, FalseAlarms, per_day_ci
 from .augment import Augment
 from .baseline import choose_threshold, split_validation
 from .canonical import ACC_CLIP_G, FS, REFERENCE_HANGING_G, mirror_right_to_left, rot_align
@@ -209,7 +209,6 @@ def mounting_sensitivity(pids: list[str], thr: pd.DataFrame, seeds: int, refract
         n = M.FallCNN(4).to(M.device())
         n.load_state_dict(torch.load(root / "models" / f"seed{s}.pt"))
         nets.append(n.eval())
-    win, stride = round(WIN_S * FS), round(STRIDE_S * FS)
     sub = pids[:: max(1, len(pids) // 40)]  # ~40 participants keep this affordable
     rows = []
     for pid in sub:
@@ -218,13 +217,11 @@ def mounting_sensitivity(pids: list[str], thr: pd.DataFrame, seeds: int, refract
             a = acc0 * np.array([1.0, -1.0, 1.0], np.float32) if unmirror else acc0
             a = np.ascontiguousarray(a @ _roll(deg).T)
             for seed in range(seeds):
-                sc = score_signal(nets[seed], a)
-                end_s = (np.arange(len(sc)) * stride + win) / FS
+                fa = FalseAlarms.from_window_scores([score_signal(nets[seed], a)], refractory=refractory)
                 for rule in RULES:
                     t = thr[(thr.seed == seed) & (thr.rule == rule)].threshold.iloc[0]
                     rows.append({"mounting": name, "rule": rule, "seed": seed, "pid": pid,
-                                 "hours": len(sc) * STRIDE_S / 3600,
-                                 "events": count_events(end_s[sc >= t], refractory)})
+                                 "hours": fa.hours[0], "events": int(fa.events(t)[0])})
     return pd.DataFrame(rows)
 
 
@@ -235,44 +232,34 @@ def tradeoff(pids: list[str], seeds: int, refractory: float, root=OUT) -> pd.Dat
     """Alarm events/24 h on Capture-24 (final model) against sensitivity on out-of-dataset fall windows
     (nested models trained on three of the four datasets, equal weight per dataset) at the same threshold.
     The two models differ (3 vs 4 training datasets), so this is an approximation."""
-    win, stride = round(WIN_S * FS), round(STRIDE_S * FS)
     rows = []
     scores = {pid: np.load(root / "scores" / f"{pid}.npy") for pid in pids}
     for seed in range(seeds):
         fs = np.load(root / "fall_scores" / f"seed{seed}.npz")
-        for t in THRESHOLDS:
-            ev = hrs = 0
-            for pid in pids:
-                sc = scores[pid][seed]
-                end_s = (np.arange(len(sc)) * stride + win) / FS
-                ev += count_events(end_s[sc >= t], refractory)
-                hrs += len(sc) * STRIDE_S / 3600
+        fa = FalseAlarms.from_window_scores([scores[p][seed] for p in pids], refractory=refractory)
+        _, per_day = fa.curve(THRESHOLDS)
+        for t, v in zip(THRESHOLDS, per_day):
             sens = np.mean([(fs[k] >= t).mean() for k in fs.files])
-            rows.append({"seed": seed, "threshold": t, "events_per_24h": ev / hrs * 24, "fall_window_sensitivity": sens})
+            rows.append({"seed": seed, "threshold": t, "events_per_24h": v, "fall_window_sensitivity": sens})
     return pd.DataFrame(rows)
 
 
 def alarm_table(pids: list[str], thr: pd.DataFrame, seeds: int, refractory: float, root=OUT) -> pd.DataFrame:
-    """One row per (seed, rule, participant, label): hours of exposure and alarm events."""
-    rows = []
+    """One row per (seed, rule, participant, label): hours of exposure, alarm events (labelled by the
+    window that opened the event) and fired windows."""
     win, stride = round(WIN_S * FS), round(STRIDE_S * FS)
-    for pid in pids:
-        sc = np.load(root / "scores" / f"{pid}.npy")
-        lab = np.load(OUT / f"{pid}.npz")["lab"]
-        centre = lab[np.arange(sc.shape[1]) * stride + win // 2]
-        end_s = (np.arange(sc.shape[1]) * stride + win) / FS
-        for seed in range(seeds):
-            for rule in RULES:
-                t = thr[(thr.seed == seed) & (thr.rule == rule)].threshold.iloc[0]
-                fired = sc[seed] >= t
-                for code in np.unique(centre):
-                    m = centre == code
-                    name = LABELS[code] if code != UNLABELLED else "unlabelled"
-                    ev = count_events(end_s[fired & m], refractory)
-                    rows.append({"seed": seed, "rule": rule, "pid": pid, "label": name,
-                                 "hours": m.sum() * STRIDE_S / 3600, "events": ev,
-                                 "windows": int((fired & m).sum())})
-    return pd.DataFrame(rows)
+    names = {**dict(enumerate(LABELS)), UNLABELLED: "unlabelled"}
+    sc = {p: np.load(root / "scores" / f"{p}.npy") for p in pids}
+    centre = {p: np.load(OUT / f"{p}.npz")["lab"][np.arange(sc[p].shape[1]) * stride + win // 2] for p in pids}
+    labels = [np.array([names[int(c)] for c in centre[p]]) for p in pids]
+    rows = []
+    for seed in range(seeds):
+        fa = FalseAlarms.from_window_scores([sc[p][seed] for p in pids], labels, refractory)
+        for rule in RULES:
+            t = thr[(thr.seed == seed) & (thr.rule == rule)].threshold.iloc[0]
+            d = fa.by_label(t)
+            rows.append(d.assign(seed=seed, rule=rule, pid=[pids[k] for k in d.wearer]).rename(columns={"detections": "windows"}))
+    return pd.concat(rows, ignore_index=True)[["seed", "rule", "pid", "label", "hours", "events", "windows"]]
 
 
 def run(seeds: int = 5, negatives: bool = False) -> None:
@@ -298,18 +285,11 @@ def run(seeds: int = 5, negatives: bool = False) -> None:
     tr = pd.read_csv(tr_path) if tr_path.exists() else tradeoff(pids, seeds, REFRACTORY_S, root)
     tr.to_csv(tr_path, index=False)
     tab.to_csv(out / "alarms_by_label.csv.gz", index=False)
-    write_report(prep, tab, thr, out, seeds, time.time() - t0, ms, tr, negatives)
+    write_report(prep, tab, thr, out, seeds, time.time() - t0, ms, tr, negatives, root)
     print(f"report: {out / 'report.md'}")
 
 
-def _wilson_ci(x: np.ndarray, hours: np.ndarray, rng: np.random.Generator, n: int = 2000):
-    """Bootstrap over participants of the pooled rate (events per hour)."""
-    idx = rng.integers(0, len(x), (n, len(x)))
-    r = x[idx].sum(1) / hours[idx].sum(1)
-    return np.percentile(r, [2.5, 97.5])
-
-
-def write_report(prep, tab, thr, out, seeds, seconds, ms, tr, negatives=False) -> None:
+def write_report(prep, tab, thr, out, seeds, seconds, ms, tr, negatives=False, root=OUT) -> None:
     rng = np.random.default_rng(0)
     ex = prep[prep.excluded.notna()] if "excluded" in prep else prep.iloc[0:0]
     ok = prep[prep.excluded.isna()] if "excluded" in prep else prep
@@ -330,8 +310,8 @@ def write_report(prep, tab, thr, out, seeds, seconds, ms, tr, negatives=False) -
              "mounting is aligned per person from walking (direction only, norm ~0.7 g because of arm swing). "
              "(2) Only about 66% of the hours are labelled; the rest is shown as `unlabelled`. (3) A fall or "
              "near-fall that really happened would count as a false alarm here, since nothing marks it. (4) The "
-             "AX3 samples at 100 Hz and was low-passed and decimated to 25 Hz by the same code path as the real "
-             "datasets. (5) 151 people × one day: day-to-day variation within a person is not measured.\n")
+             "AX3 samples at 100 Hz and was low-passed with the same anti-alias filter as the real datasets and decimated to 25 Hz. "
+             "(5) 151 people × one day: day-to-day variation within a person is not measured.\n")
     if len(ex):
         L.append(f"Excluded participants: {len(ex)} ({'; '.join(f'{r.pid}: {r.excluded}' for r in ex.itertuples())}).\n")
 
@@ -351,7 +331,7 @@ def write_report(prep, tab, thr, out, seeds, seconds, ms, tr, negatives=False) -
         rates, lo_hi = [], []
         for s, gg in pp.groupby("seed"):
             rates.append(gg.events.sum() / gg.hours.sum() * 24)
-            lo_hi.append(_wilson_ci(gg.events.to_numpy(float), gg.hours.to_numpy(float), rng) * 24)
+            lo_hi.append(per_day_ci(gg.events.to_numpy(), gg.hours.to_numpy(), rng))
         lo, hi = np.mean(lo_hi, axis=0)
         med = pp.groupby("seed").per_day.median().mean()
         p90 = pp.groupby("seed").per_day.quantile(0.9).mean()
@@ -419,10 +399,9 @@ def write_report(prep, tab, thr, out, seeds, seconds, ms, tr, negatives=False) -
         L.append(f"| {t:g} | {g.events_per_24h.mean():.1f} ± {g.events_per_24h.std(ddof=0):.1f} | "
                  f"{g.fall_window_sensitivity.mean():.3f} ± {g.fall_window_sensitivity.std(ddof=0):.3f} |")
     L.append("")
-    L.append("## 6. Comparison with the assumed-budget estimate (`alarms.py`)\n")
-    L.append("`reports/alarms/report.md` estimated 26 (val-slice) and 155 (lodo-pooled) alarms for a typical day, "
-             "and 55 / 210 for an active day, from lab clips and assumed time budgets. The measured rates above "
-             "replace that assumption.\n")
-    L.append(f"Weights: threshold levels per seed are in `data/processed/capture24/thresholds.csv`. "
+    L.append("## 6. Comparison with the assumed-budget estimate\n")
+    L.append("`reports/alarms/report.md` estimated alarms per day from lab clips and assumed activity time budgets "
+             "(`budget_estimate.py`). The measured rates above replace that assumption.\n")
+    L.append(f"Threshold levels per seed are in `{root.relative_to(PROCESSED.parent.parent)}/thresholds.csv`. "
              f"Runtime of the last report step: {seconds / 60:.1f} min (fits and scoring are cached).\n")
     (out / "report.md").write_text("\n".join(L))

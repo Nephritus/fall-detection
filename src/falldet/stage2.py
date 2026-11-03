@@ -28,11 +28,12 @@ from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.metrics import roc_auc_score
 
 from . import model as M
-from .alarms import REFRACTORY_S, count_events
+from .alarms import REFRACTORY_S, FalseAlarms
 from .augment import Augment
 from .baseline import choose_threshold, split_validation
 from .canonical import FS
 from .cli import PROCESSED, RAW, REPORTS
+from .freeliving import LABELS as C24_LABELS
 from .freeliving import OUT, score_signal
 from .negatives import RANDOM_K, VAL_K, load_acc, random_windows, test_pids
 from .windows import STRIDE_S, WIN_S
@@ -46,6 +47,15 @@ CACHE = OUT / "stage2"
 WIN, STRIDE = round(WIN_S * FS), round(STRIDE_S * FS)
 BUDGETS = (10, 25, 50, 100)
 SENS_TARGETS = (0.80, 0.90, 0.95)
+
+
+def wearer_hours(z) -> list[float]:
+    """Exposure per held-out person for a saved fold (older files lack it: rebuilt from signal lengths)."""
+    if "wearer_hours" in z.files:
+        return [float(h) for h in z["wearer_hours"]]
+    prep = pd.read_csv(OUT / "prepare_log.csv")
+    n = [int(np.load(CACHE / f"{p}.npz", allow_pickle=True)["n"]) for p in test_pids(prep)]
+    return [((k - WIN) // STRIDE + 1) * STRIDE_S / 3600 for k in n]
 
 
 # --------------------------------------------------------------------------------- features
@@ -170,17 +180,26 @@ def fit_stage2(X: np.ndarray, y: np.ndarray, w: np.ndarray, seed: int) -> HistGr
         random_state=seed).fit(X, y, sample_weight=w)
 
 
-def eval_grid(fall: dict, fl: dict, hours: float) -> tuple[np.ndarray, np.ndarray]:
+def c24_alarms(fl: dict, score: np.ndarray, hours: list[float], label_hours: list[dict] | None = None) -> FalseAlarms:
+    """Candidates of the held-out Capture-24 people as detections: alarm time = impact + POST_S (when the
+    device would alert), one wearer per person. ``fl["t"]`` is impact time in seconds per person (files
+    written before the counting refactor stored it offset by 1e6 s per person; the offset is removed)."""
+    names = {**dict(enumerate(C24_LABELS)), 255: "unlabelled"}
+    sel = [np.where(fl["pid"] == k)[0] for k in range(len(hours))]
+    times = [np.round((fl["t"][i] - k * 1e6) * FS) / FS + POST_S for k, i in enumerate(sel)]
+    labels = [np.array([names[int(c)] for c in fl["lab"][i]]) for i in sel] if label_hours is not None else None
+    return FalseAlarms(times, [score[i] for i in sel], hours, labels, label_hours)
+
+
+def eval_grid(fall: dict, fl: dict, hours: list[float]) -> tuple[np.ndarray, np.ndarray]:
     """Per-recording sensitivity and free-living alarms/day on the (t1, t2) grid."""
     n = len(GRID)
     sens, alarms = np.zeros((n, n)), np.zeros((n, n))
     for i, t1 in enumerate(GRID):
-        a = fl["s1"] >= t1
+        alarms[i] = c24_alarms(fl, np.where(fl["s1"] >= t1, fl["p2"], -np.inf), hours).curve(GRID)[1]
         for j, t2 in enumerate(GRID):
             hit = fall["trig"] & (fall["s1"] >= t1) & (fall["p2"] >= t2)
             sens[i, j] = hit[fall["ctx"]].mean()
-            m = a & (fl["p2"] >= t2)
-            alarms[i, j] = count_events(fl["t"][m], REFRACTORY_S) / hours * 24
     return sens, alarms
 
 
@@ -271,23 +290,21 @@ def run(seed: int) -> None:
             d = people[p]
             if not len(d["idx"]):
                 continue
-            t_.append(d["idx"] / FS + k * 1e6)
+            t_.append(d["idx"] / FS)
             s1_.append(stage1_at(sc[p], d["idx"]))
             p2_.append(clf.predict_proba(d["X"])[:, 1])
             lb_.append(d["lab"])
             pid_.append(np.full(len(d["idx"]), k))
         fl = {"t": np.concatenate(t_), "s1": np.concatenate(s1_), "p2": np.concatenate(p2_),
               "lab": np.concatenate(lb_), "pid": np.concatenate(pid_)}
-        hours = sum(len(s) for s in sc.values()) * STRIDE_S / 3600
+        hours = [len(sc[p]) * STRIDE_S / 3600 for p in test_p]
         sens, alarms = eval_grid(fall, fl, hours)
         # stage 1 alone, window level (as in the earlier reports), per recording
-        ev1, sens1 = [], []
-        ends = {p: (np.arange(len(s)) * STRIDE + WIN) / FS + k * 1e6 for k, (p, s) in enumerate(sc.items())}
-        allsc, allend = np.concatenate(list(sc.values())), np.concatenate(list(ends.values()))
-        for t1 in np.r_[GRID, t1_val]:
-            ev1.append(count_events(allend[allsc >= t1], REFRACTORY_S) / hours * 24)
-            sens1.append((fall["s1"][fall["ctx"]] >= t1).mean())
-        np.savez(f, sens=sens, alarms=alarms, ev1=ev1, sens1=sens1, t1_val=t1_val, t2_val=t2_val, hours=hours,
+        stage1 = FalseAlarms.from_window_scores([sc[p] for p in test_p])
+        ev1 = [stage1.per_day(t1) for t1 in np.r_[GRID, t1_val]]
+        sens1 = [(fall["s1"][fall["ctx"]] >= t1).mean() for t1 in np.r_[GRID, t1_val]]
+        np.savez(f, sens=sens, alarms=alarms, ev1=ev1, sens1=sens1, t1_val=t1_val, t2_val=t2_val, hours=sum(hours),
+                 wearer_hours=hours,
                  **{f"fall_{k}": v for k, v in fall.items()}, **{f"fl_{k}": v for k, v in fl.items()},
                  stage2_val_auroc=roc_auc_score(yv, pv), n_pos=int(sets["tr"][1].sum()), n_neg=int((1 - sets["tr"][1]).sum()),
                  n_fall_recs=len(T), n_fall_ctx=int(T.ctx.sum()), n_fall_trig=int((T.trig.to_numpy() & okm).sum()))
@@ -346,17 +363,17 @@ def report() -> None:
         fall = {k: z[f"fall_{k}"] for k in ("s1", "p2", "trig", "ctx")}
         fl = {k: z[f"fl_{k}"] for k in ("t", "s1", "p2", "lab", "pid")}
         a = (fl["s1"] >= z["t1_val"])
-        m = a & (fl["p2"] >= z["t2_val"])
+        wh = wearer_hours(z)
         pract["s1_alarms"], pract["s1_sens"] = float(z["ev1"][-1]), float(z["sens1"][-1])
-        pract["gate_alarms"] = count_events(fl["t"][a], REFRACTORY_S) / float(z["hours"]) * 24
-        pract["two_alarms"] = count_events(fl["t"][m], REFRACTORY_S) / float(z["hours"]) * 24
+        pract["gate_alarms"] = c24_alarms(fl, fl["s1"], wh).per_day(float(z["t1_val"]))
+        pract["two_alarms"] = c24_alarms(fl, np.where(a, fl["p2"], -np.inf), wh).per_day(float(z["t2_val"]))
         hit = lambda msk: (fall["trig"] & msk)[fall["ctx"]].mean()  # noqa: E731
         pract["gate_sens"] = hit(fall["s1"] >= z["t1_val"])
         pract["two_sens"] = hit((fall["s1"] >= z["t1_val"]) & (fall["p2"] >= z["t2_val"]))
         rows.append(pract)
         base = {"fold": d, "seed": s}
         for tg in SENS_TARGETS:
-            fr.append({**base, "target": tg, "stage1": _frontier(sens1_mat := np.array(z["sens1"][:-1])[:, None], np.array(z["ev1"][:-1])[:, None], tg),
+            fr.append({**base, "target": tg, "stage1": _frontier(np.array(z["sens1"][:-1])[:, None], np.array(z["ev1"][:-1])[:, None], tg),
                        "stage2": _frontier(sens[0:1, :], alarms[0:1, :], tg), "both": _frontier(sens, alarms, tg)})
         for b in BUDGETS:
             sb.append({**base, "budget": b, "stage1": _sens_at(np.array(z["sens1"][:-1]), np.array(z["ev1"][:-1]), b),
@@ -404,24 +421,23 @@ def report() -> None:
     L.append("")
 
     # where remaining alarms come from
-    names = ["sleep", "sitting", "standing", "walking", "household-chores", "manual-work", "mixed-activity", "sports", "vehicle", "bicycling"]
-    lab_names = {i: n for i, n in enumerate(names)} | {255: "unlabelled"}
-    hours = {}
-    for k, p in enumerate(test_pids(prep)):
-        lb = np.load(OUT / f"{p}.npz")["lab"]
-        for c, n in zip(*np.unique(lb, return_counts=True)):
-            hours[lab_names[int(c)]] = hours.get(lab_names[int(c)], 0) + n / FS / 3600
+    lab_names = {**dict(enumerate(C24_LABELS)), 255: "unlabelled"}
+    label_hours = []
+    for p in test_pids(prep):
+        u, c = np.unique(np.load(OUT / f"{p}.npz")["lab"], return_counts=True)
+        label_hours.append({lab_names[int(k)]: n / FS / 3600 for k, n in zip(u, c)})
+    hours = pd.DataFrame(label_hours).sum().to_dict()
     cnt = {}
     for (s, d), z in Z.items():
-        a = z["fl_s1"] >= z["t1_val"]
-        m = a & (z["fl_p2"] >= z["t2_val"])
-        for key, mask in (("gate", a), ("two", m)):
-            for c in np.unique(z["fl_lab"]):
-                sel = mask & (z["fl_lab"] == c)
-                cnt[(key, lab_names[int(c)])] = cnt.get((key, lab_names[int(c)]), 0) + count_events(z["fl_t"][sel], REFRACTORY_S)
-    n = len(Z) / len(folds) * 1.0 * len(folds)
+        fl = {k: z[f"fl_{k}"] for k in ("t", "s1", "p2", "lab", "pid")}
+        a = fl["s1"] >= z["t1_val"]
+        for key, score, thr in (("gate", fl["s1"], z["t1_val"]), ("two", np.where(a, fl["p2"], -np.inf), z["t2_val"])):
+            ev = c24_alarms(fl, score, wearer_hours(z), label_hours).by_label(float(thr)).groupby("label").events.sum()
+            for lbl, v in ev.items():
+                cnt[(key, lbl)] = cnt.get((key, lbl), 0) + int(v)
     L.append("## 4. Where the remaining alarms come from (practical rule)\n")
-    L.append("Events per hour of each Capture-24 activity, pooled over the held-out datasets and seeds (the 48 held-out people are scored once per fold and seed).\n")
+    L.append(f"Events per hour of each Capture-24 activity, pooled over the held-out datasets and seeds (the {len(test_pids(prep))} "
+             "held-out people are scored once per fold and seed; an alarm event belongs to the activity of the candidate that opened it).\n")
     L.append("| activity | hours | stage 1 + trigger | two-stage |")
     L.append("|---|---|---|---|")
     for lbl in sorted(hours, key=lambda k: -cnt.get(("two", k), 0)):
