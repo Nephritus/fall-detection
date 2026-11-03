@@ -22,9 +22,10 @@ import pandas as pd
 import torch
 
 from .augment import Augment
-from .baseline import choose_threshold, metrics, split_validation
+from .baseline import metrics, split_validation
 from .cli import PROCESSED, REPORTS
 from .model import FallModel
+from .rules import keep_falls
 
 COLS = ["sensitivity", "false_alarms_per_h", "auroc", "ap", "fa_h_at_95sens_oracle"]
 LOWER = {"false_alarms_per_h", "fa_h_at_95sens_oracle"}
@@ -79,7 +80,7 @@ def run(seeds: int = 8, channels: str = "acc") -> None:
                 test = np.where(meta.dataset == d)[0]
                 tr, va = split_validation(meta, np.where(meta.dataset != d)[0], seed)
                 net = train(cond, seed, xr, y, tr, va, xs, ys, aug, channels)
-                thr = choose_threshold(net.scores(xr[va]), y[va])
+                thr = keep_falls(net.scores(xr[va]), y[va])
                 p = net.scores(xr[test])
                 rows.append({"cond": cond, "seed": seed, "fold": d,
                              **metrics(y[test], (p >= thr).astype(int), p)})

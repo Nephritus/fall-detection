@@ -27,30 +27,15 @@ import pandas as pd
 import torch
 
 from .augment import Augment
-from .baseline import TARGET_SENSITIVITY, choose_threshold, metrics, split_validation
+from .baseline import metrics, split_validation
 from .cli import PROCESSED, REPORTS
 from .finetune import split_target
 from .model import FallModel
-from .windows import STRIDE_S
+from .rules import TARGET_SENSITIVITY, adl_budget, keep_falls, lodo_median, lodo_pooled, lodo_worst
 
 BUDGETS = (10, 25, 50)  # false alarms per hour
 RULES = ["val-slice", "lodo-pooled", "lodo-median", "lodo-worst",
          *[f"adl-budget-{b}" for b in BUDGETS], "falls-pool", "oracle"]
-
-
-def balanced_threshold(scores: list[np.ndarray]) -> float:
-    """95% sensitivity where every group of fall scores carries equal total weight."""
-    s = np.concatenate(scores)
-    w = np.concatenate([np.full(len(a), 1 / len(a)) for a in scores])
-    order = np.argsort(-s)
-    cum = np.cumsum(w[order]) / w.sum()
-    return float(s[order][np.argmax(cum >= TARGET_SENSITIVITY)])
-
-
-def budget_threshold(adl_scores: np.ndarray, fa_per_h: float) -> float:
-    """Smallest threshold whose false-alarm rate on ``adl_scores`` is <= ``fa_per_h``."""
-    rate = fa_per_h * STRIDE_S / 3600
-    return float(np.quantile(adl_scores, 1 - rate, method="higher"))
 
 
 def run(seeds: int = 3, augment: bool = False) -> None:
@@ -71,10 +56,10 @@ def run(seeds: int = 3, augment: bool = False) -> None:
             for ch in ("imu", "acc"):
                 net = FallModel.train(X[tr], y[tr], X[va], y[va], channels=ch, seed=seed, augment=aug)
                 p_ev, p_pool = net.scores(X[ev_idx]), net.scores(X[pool_idx])
-                thr = {"val-slice": choose_threshold(net.scores(X[va]), y[va])}
+                thr = {"val-slice": keep_falls(net.scores(X[va]), y[va])}
                 del net
                 # nested leave-one-dataset-out over the training datasets
-                per_ds_fall_scores, per_ds_thr = [], []
+                per_ds_fall_scores = []
                 for s in src_sets:
                     s_idx = np.where(meta.dataset == s)[0]
                     inner = np.where(~meta.dataset.isin([ds, s]))[0]
@@ -83,17 +68,16 @@ def run(seeds: int = 3, augment: bool = False) -> None:
                     ps = inet.scores(X[s_idx])
                     fall = ps[y[s_idx] == 1]
                     per_ds_fall_scores.append(fall)
-                    per_ds_thr.append(choose_threshold(ps, y[s_idx]))
                     del inet
                     torch.cuda.empty_cache()
-                thr["lodo-pooled"] = balanced_threshold(per_ds_fall_scores)
-                thr["lodo-median"] = float(np.median(per_ds_thr))
-                thr["lodo-worst"] = float(np.min(per_ds_thr))
+                thr["lodo-pooled"] = lodo_pooled(per_ds_fall_scores)
+                thr["lodo-median"] = lodo_median(per_ds_fall_scores)
+                thr["lodo-worst"] = lodo_worst(per_ds_fall_scores)
                 adl_pool = p_pool[y[pool_idx] == 0]
                 for b in BUDGETS:
-                    thr[f"adl-budget-{b}"] = budget_threshold(adl_pool, b)
-                thr["falls-pool"] = choose_threshold(p_pool, y[pool_idx])
-                thr["oracle"] = choose_threshold(p_ev, y[ev_idx])
+                    thr[f"adl-budget-{b}"] = adl_budget(adl_pool, b)
+                thr["falls-pool"] = keep_falls(p_pool, y[pool_idx])
+                thr["oracle"] = keep_falls(p_ev, y[ev_idx])
                 for rule, t in thr.items():
                     rows.append({"seed": seed, "dataset": ds, "channels": ch, "rule": rule,
                                  "threshold": t, **metrics(y[ev_idx], (p_ev >= t).astype(int), p_ev)})

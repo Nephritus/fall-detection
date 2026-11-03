@@ -28,10 +28,10 @@ from scipy.stats import gamma
 
 from .alarms import REFRACTORY_S, FalseAlarms
 from .augment import Augment
-from .baseline import choose_threshold, split_validation
+from .baseline import split_validation
 from .cli import PROCESSED, REPORTS
 from .model import FallModel
-from .threshold import balanced_threshold
+from .rules import keep_falls, lodo_pooled
 from .windows import WIN_S
 
 REFRACTORY_SWEEP = (2.0, 10.0, 30.0, 60.0)
@@ -93,7 +93,7 @@ def score(seeds: int) -> tuple[pd.DataFrame, pd.DataFrame]:
             src = np.where(meta.dataset != ds)[0]
             tr, va = split_validation(meta, src, seed)
             net = FallModel.train(X[tr], y[tr], X[va], y[va], channels="acc", seed=seed, augment=aug)
-            thr = {"val-slice": choose_threshold(net.scores(X[va]), y[va])}
+            thr = {"val-slice": keep_falls(net.scores(X[va]), y[va])}
             p = net.scores(X[test])
             del net
             falls = []
@@ -105,7 +105,7 @@ def score(seeds: int) -> tuple[pd.DataFrame, pd.DataFrame]:
                 falls.append(ps[y[s_idx] == 1])
                 del inet
                 torch.cuda.empty_cache()
-            thr["lodo-pooled"] = balanced_threshold(falls)
+            thr["lodo-pooled"] = lodo_pooled(falls)
             sc.append(pd.DataFrame({"seed": seed, "dataset": ds, "idx": test, "score": p}))
             th += [{"seed": seed, "dataset": ds, "rule": r, "threshold": t} for r, t in thr.items()]
             print(f"[seed {seed}] {ds} done ({time.time() - t0:.0f}s)", flush=True)

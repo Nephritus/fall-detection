@@ -22,18 +22,12 @@ from .canonical import FS
 from .cli import PROCESSED, REPORTS
 from .model import FallModel
 from .reference import ThresholdReference
+from .rules import TARGET_SENSITIVITY, keep_falls
 from .windows import STRIDE_S
 
-TARGET_SENSITIVITY = 0.95
 VAL_FRACTION = 0.2
 MINE_THRESHOLD_CAP = 0.10  # at most this share of training ADL windows is mined
 MINE_WEIGHT = 3.0
-
-
-# ------------------------------------------------------------------------------- helpers
-def choose_threshold(p_val: np.ndarray, y_val: np.ndarray) -> float:
-    """Largest threshold that keeps >= TARGET_SENSITIVITY of validation falls."""
-    return float(np.quantile(p_val[y_val == 1], 1 - TARGET_SENSITIVITY, method="lower"))
 
 
 def split_validation(meta: pd.DataFrame, train_idx: np.ndarray, seed: int) -> tuple[np.ndarray, np.ndarray]:
@@ -81,7 +75,7 @@ def run_fold(X, meta, y, train_idx, test_idx, channels, seed, augment=None):
     for stage in ("stage1", "stage2"):
         net = FallModel.train(X[tr], y[tr], X[va], y[va], channels=channels, seed=seed, augment=augment,
                               weights=weights)
-        thr = choose_threshold(net.scores(X[va]), y[va])
+        thr = keep_falls(net.scores(X[va]), y[va])
         p_test = net.scores(X[test_idx])
         out.append({
             "model": "cnn", "channels": channels, "stage": stage, "threshold": thr, "mined": mined,
@@ -109,7 +103,7 @@ def mine_hard_negatives(X, channels, y, meta, tr, va, seed, folds: int = 3, augm
         held = subs.isin(part).to_numpy()
         net = FallModel.train(X[tr[~held]], y[tr[~held]], X[va], y[va], channels=channels, seed=seed,
                               augment=augment)
-        thr = choose_threshold(net.scores(X[va]), y[va])
+        thr = keep_falls(net.scores(X[va]), y[va])
         p = net.scores(X[tr[held]])
         idx = np.where(held)[0]
         fire = (y[tr[idx]] == 0) & (p >= thr)

@@ -33,10 +33,12 @@ import torch
 from .model import FallModel
 from .alarms import REFRACTORY_S, FalseAlarms, per_day_ci, sensitivity_at_budget
 from .augment import Augment
-from .baseline import choose_threshold, metrics, split_validation
+from .baseline import metrics, split_validation
 from .canonical import FS
 from .cli import PROCESSED, REPORTS
 from .freeliving import OUT, SOURCE
+from .rules import keep_falls
+
 RANDOM_K = 1500  # Capture-24 windows added per training participant
 MINED_FRACTION = 2 / 3
 VAL_K = 800  # random windows per Capture-24 validation participant
@@ -102,7 +104,7 @@ def run(seed: int) -> None:
         tr, va = split_validation(meta, np.where(meta.dataset != ds)[0], seed)
         xv, yv = x[va], y[va]
         net = FallModel.train(x[tr], y[tr], xv, yv, channels="acc", seed=seed, augment=aug)
-        thr = choose_threshold(net.scores(xv), yv)
+        thr = keep_falls(net.scores(xv), yv)
         row, cv = evaluate(net, "real", x, y, test, va, thr, test_acc)
         rows.append({"seed": seed, "fold": ds, **row})
         curves.update({f"{ds}|real|{k}": v for k, v in cv.items()})
@@ -117,7 +119,7 @@ def run(seed: int) -> None:
             xt = np.concatenate([x[tr], xc])
             yt = np.concatenate([y[tr], np.zeros(len(xc), np.int64)])
             net = FallModel.train(xt, yt, xvc, yvc, channels="acc", seed=seed, augment=aug)
-            thr = choose_threshold(net.scores(xv), yv)  # falls only matter for the threshold
+            thr = keep_falls(net.scores(xv), yv)  # falls only matter for the threshold
             row, cv = evaluate(net, cond, x, y, test, va, thr, test_acc)
             rows.append({"seed": seed, "fold": ds, **row})
             curves.update({f"{ds}|{cond}|{k}": v for k, v in cv.items()})
@@ -307,7 +309,7 @@ def scale(seed: int, ks: tuple[int, ...] = SCALE_KS) -> None:
             yvc = np.concatenate([yv, np.zeros(len(x_c24_val), np.int64)])
             net = FallModel.train(xt, yt, xvc, yvc, channels="acc", seed=seed, augment=aug)
             del xt
-            thr = choose_threshold(net.scores(xv), yv)
+            thr = keep_falls(net.scores(xv), yv)
             row, cv = evaluate(net, f"c24-random-{k}", x, y, test, va, thr, test_acc)
             np.savez(out / f"seed{seed}_K{k}_{ds}.npz", **cv)
             pd.DataFrame([{"seed": seed, "fold": ds, "K": k, **row}]).to_csv(f, index=False)

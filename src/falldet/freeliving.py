@@ -23,10 +23,10 @@ import torch
 from .model import FallModel
 from .alarms import REFRACTORY_S, FalseAlarms, per_day_ci
 from .augment import Augment
-from .baseline import choose_threshold, split_validation
+from .baseline import split_validation
 from .capture24 import Capture24
 from .cli import PROCESSED, RAW, REPORTS
-from .threshold import balanced_threshold
+from .rules import keep_falls, lodo_pooled
 
 OUT = PROCESSED / "capture24"
 SOURCE = Capture24(OUT)
@@ -63,7 +63,7 @@ def fit_models(seeds: int, root=OUT, extra=None) -> pd.DataFrame:
 
         tr, va = split_validation(meta, np.arange(len(meta)), seed)
         net = fit(tr, va)
-        thr = {"val-slice": choose_threshold(net.scores(x[va]), y[va])}
+        thr = {"val-slice": keep_falls(net.scores(x[va]), y[va])}
         net.save(root / "models" / f"seed{seed}.pt")
         del net
         falls, fall_scores = [], {}
@@ -76,7 +76,7 @@ def fit_models(seeds: int, root=OUT, extra=None) -> pd.DataFrame:
             fall_scores[s] = fs_
             del inet
             torch.cuda.empty_cache()
-        thr["lodo-pooled"] = balanced_threshold(falls)
+        thr["lodo-pooled"] = lodo_pooled(falls)
         np.savez(root / "fall_scores" / f"seed{seed}.npz", **fall_scores)
         rows += [{"seed": seed, "rule": r, "threshold": t} for r, t in thr.items()]
         print(f"[fit] seed {seed} done ({time.time() - t0:.0f}s) {thr}", flush=True)

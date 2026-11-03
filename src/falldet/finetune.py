@@ -16,9 +16,10 @@ import pandas as pd
 import torch
 
 from .augment import Augment
-from .baseline import choose_threshold, metrics, split_validation
+from .baseline import metrics, split_validation
 from .cli import PROCESSED, REPORTS
 from .model import FallModel
+from .rules import keep_falls
 
 K_VALUES = (1, 2, 4)
 METHODS = ("zero-shot", "recalibrated", "adabn", "head-only", "full", "scratch")
@@ -57,7 +58,7 @@ def run(seeds: int = 3, augment: bool = False) -> None:
             tr, va = split_validation(meta, src, seed)
             for ch in ("imu", "acc"):
                 base = FallModel.train(X[tr], y[tr], X[va], y[va], channels=ch, seed=seed, augment=aug)
-                thr_src = choose_threshold(base.scores(X[va]), y[va])
+                thr_src = keep_falls(base.scores(X[va]), y[va])
 
                 def record(method, k, net, thr, n_ft=0, n_ft_fall=0):
                     p = net.scores(X[ev_idx])
@@ -79,16 +80,16 @@ def run(seeds: int = 3, augment: bool = False) -> None:
                         continue
                     n_ft, n_f = len(ft), int(y[ft].sum())
                     record("zero-shot", k, base, thr_src)
-                    thr = choose_threshold(base.scores(X[cal]), y[cal])
+                    thr = keep_falls(base.scores(X[cal]), y[cal])
                     record("recalibrated", k, base, thr)
                     ada = base.adapt_batchnorm(X[pool_all])
-                    record("adabn", k, ada, choose_threshold(ada.scores(X[cal]), y[cal]))
+                    record("adabn", k, ada, keep_falls(ada.scores(X[cal]), y[cal]))
                     for name, freeze in (("head-only", True), ("full", False)):
                         net = base.continue_training(X[ft], y[ft], X[cal], y[cal], seed=seed, freeze_features=freeze,
                                                      augment=aug)
-                        record(name, k, net, choose_threshold(net.scores(X[cal]), y[cal]), n_ft, n_f)
+                        record(name, k, net, keep_falls(net.scores(X[cal]), y[cal]), n_ft, n_f)
                     sc = FallModel.train(X[ft], y[ft], X[cal], y[cal], channels=ch, seed=seed, augment=aug)
-                    record("scratch", k, sc, choose_threshold(sc.scores(X[cal]), y[cal]), n_ft, n_f)
+                    record("scratch", k, sc, keep_falls(sc.scores(X[cal]), y[cal]), n_ft, n_f)
                 del base
                 torch.cuda.empty_cache()
             print(f"[seed {seed}] {ds} done ({time.time() - t0:.0f}s)", flush=True)

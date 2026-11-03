@@ -31,12 +31,13 @@ from sklearn.metrics import roc_auc_score
 from .model import FallModel
 from .alarms import REFRACTORY_S, FalseAlarms
 from .augment import Augment
-from .baseline import choose_threshold, split_validation
+from .baseline import split_validation
 from .canonical import FS
 from .cli import PROCESSED, RAW, REPORTS
 from .capture24 import LABEL_NAMES
 from .freeliving import OUT, SOURCE
 from .negatives import RANDOM_K, VAL_K
+from .rules import keep_falls
 from .windows import STRIDE_S, WIN_S
 
 TRIGGER_G, MIN_SEP_S = 2.0, 2.0
@@ -248,7 +249,7 @@ def run(seed: int) -> None:
         xvc = np.concatenate([x[va], x_c24_val])
         yvc = np.concatenate([y[va], np.zeros(len(x_c24_val), np.int64)])
         net = FallModel.train(xt, yt, xvc, yvc, channels="acc", seed=seed, augment=aug)
-        t1_val = choose_threshold(net.scores(x[va]), y[va])
+        t1_val = keep_falls(net.scores(x[va]), y[va])
         p_test = net.scores(x[test])
         sc = {p: net.score_signal(SOURCE.signal(p)) for p in test_p}
         del net, xt, xc
@@ -271,7 +272,7 @@ def run(seed: int) -> None:
         clf = fit_stage2(*sets["tr"], seed)
         pv = clf.predict_proba(sets["va"][0])[:, 1]
         yv = sets["va"][1]
-        t2_val = float(np.quantile(pv[yv == 1], 0.02, method="lower"))
+        t2_val = keep_falls(pv, yv, share=0.98)
         # ---- held-out dataset: fall recordings
         T = lab[(lab.dataset == ds) & lab.is_fall].set_index("rec")
         wf = meta.iloc[test]
