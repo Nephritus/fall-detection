@@ -56,7 +56,52 @@ def mirror_right_to_left(acc: np.ndarray, gyro: np.ndarray) -> tuple[np.ndarray,
     Reflecting the body across the sagittal plane negates y for polar vectors; the gyroscope is an
     axial vector, so its x and z components flip instead.
     """
-    return acc * np.array([1.0, -1.0, 1.0]), gyro * np.array([-1.0, 1.0, -1.0])
+    return acc * _MIRROR_ACC, gyro * _MIRROR_GYRO
+
+
+_MIRROR_ACC = np.array([1.0, -1.0, 1.0])  # polar vector: lateral axis flips
+_MIRROR_GYRO = np.array([-1.0, 1.0, -1.0])  # axial vector: the other two flip
+
+
+@dataclass(frozen=True)
+class MountingAlignment:
+    """How one wearer's signal maps into the wrist frame (GLOSSARY: Mounting alignment)."""
+
+    wrist: str  # "left" | "right"
+    norm_g: float  # magnitude of the reference mean; a hanging, still arm reads about 1 g
+    rotation: np.ndarray | None  # None when the wearer is excluded
+
+    @property
+    def excluded(self) -> bool:
+        return self.rotation is None
+
+    def apply(self, acc: np.ndarray, gyro: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray | None]:
+        """Rotate into the wrist frame and, for a right wrist, mirror to the left-wrist convention."""
+        if self.rotation is None:
+            raise ValueError(f"excluded wearer (reference mean {self.norm_g:.2f} g) has no alignment")
+        acc = acc @ self.rotation.T
+        gyro = None if gyro is None else gyro @ self.rotation.T
+        if self.wrist == "right":
+            acc = acc * _MIRROR_ACC
+            gyro = None if gyro is None else gyro * _MIRROR_GYRO
+        return acc, gyro
+
+
+def align_mounting(reference_acc: np.ndarray, wrist: str, min_norm_g: float = MIN_HANGING_NORM_G) -> MountingAlignment:
+    """Mounting alignment of one wearer from accelerometer samples (g) of a reference activity during which
+    the arm hangs (standing or walking): the mean specific force is rotated onto REFERENCE_HANGING_G (its
+    right-wrist mirror for a right wrist). A mean weaker than ``min_norm_g`` shows no reliable direction,
+    so the wearer is excluded instead."""
+    if wrist not in ("left", "right"):
+        raise ValueError(f"wrist must be 'left' or 'right', not {wrist!r}")
+    if len(reference_acc) == 0:
+        raise ValueError("no reference samples")
+    mean = np.asarray(reference_acc, float).mean(axis=0)
+    norm = float(np.linalg.norm(mean))
+    if norm < min_norm_g:
+        return MountingAlignment(wrist, norm, None)
+    target = REFERENCE_HANGING_G * (_MIRROR_ACC if wrist == "right" else 1.0)
+    return MountingAlignment(wrist, norm, rot_align(mean, target))
 
 
 def to_grid(t: np.ndarray, x: np.ndarray, fs_native: float, grid: np.ndarray) -> np.ndarray:

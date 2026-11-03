@@ -17,7 +17,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from .canonical import ACC_CLIP_G, FS, MIN_HANGING_NORM_G, REFERENCE_HANGING_G, Recording, find_impact, rot_align
+from .canonical import ACC_CLIP_G, FS, Recording, align_mounting, find_impact
 from .mocap import forward_kinematics, parse_bvh, resample_to_canonical, virtual_wrist_imu
 from .windows import WIN_S, build_windows
 
@@ -85,21 +85,21 @@ def build_synthetic(raw: Path) -> tuple[np.ndarray, pd.DataFrame, dict]:
         takes.append((theme, subj, acc[n:-n], gyro[n:-n], [(u - TRIM_S, i - TRIM_S, k) for u, i, k in ev]))
 
     # per-subject mounting alignment from walking, exactly as for the real datasets
-    rots, info_align = {}, {}
+    aligns, info_align = {}, {}
     for subj in sorted({t[1] for t in takes}):
         walk = [t[2] for t in takes if t[1] == subj and t[0] == "walk"]
-        mean = np.concatenate(walk).mean(axis=0)
-        info_align[f"lafan1:S{subj}"] = round(float(np.linalg.norm(mean)), 3)
-        assert np.linalg.norm(mean) >= MIN_HANGING_NORM_G, f"subject {subj}: arm not hanging while walking"
-        rots[subj] = rot_align(mean, REFERENCE_HANGING_G)
+        aligns[subj] = align_mounting(np.concatenate(walk), "left")
+        info_align[f"lafan1:S{subj}"] = round(aligns[subj].norm_g, 3)
 
     recs: list[Recording] = []
     n_fall = {"forward": 0, "backward": 0, "lateral": 0}
     n_ambiguous = 0
     for theme, subj, acc, gyro, events in takes:
-        r = rots[subj]
-        acc = np.clip(acc @ r.T, -ACC_CLIP_G, ACC_CLIP_G).astype(np.float32)
-        gyro = (gyro @ r.T).astype(np.float32)
+        if aligns[subj].excluded:
+            continue
+        acc, gyro = aligns[subj].apply(acc, gyro)
+        acc = np.clip(acc, -ACC_CLIP_G, ACC_CLIP_G).astype(np.float32)
+        gyro = gyro.astype(np.float32)
         sid, tid = f"lafan1:S{subj}", f"{theme}"
         if theme in FALL_THEMES:
             for k, (u, i, kind) in enumerate(events):
@@ -127,6 +127,7 @@ def build_synthetic(raw: Path) -> tuple[np.ndarray, pd.DataFrame, dict]:
         "takes": len(takes), "subjects": len({t[1] for t in takes}),
         "fall_events": n_fall, "ambiguous_events_excluded": n_ambiguous,
         "walking_mean_norm_g": info_align,
+        "excluded_subjects": sorted(f"lafan1:S{s}" for s, a in aligns.items() if a.excluded),
         "windows": {"fall": int(len(fall)), "adl": int(len(adl))},
         "fall_peak_acc_g_p10_50_90": pk(fall), "adl_peak_acc_g_p10_50_90": pk(adl),
         "fall_peak_gyro_rad_s_p50": float(np.median(np.linalg.norm(fall[:, :, 3:], axis=2).max(1))),

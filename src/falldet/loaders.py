@@ -12,12 +12,9 @@ from .canonical import (
     ACC_CLIP_G,
     FS,
     G,
-    MIN_HANGING_NORM_G,
-    REFERENCE_HANGING_G,
     Recording,
+    align_mounting,
     find_impact,
-    mirror_right_to_left,
-    rot_align,
     to_grid,
 )
 
@@ -92,20 +89,17 @@ def load_upfall(raw: Path) -> tuple[list[Recording], dict]:
     df["t"] = (pd.to_datetime(df["ts"]) - pd.Timestamp("1970-01-01")).dt.total_seconds()
     recs, excluded = [], {}
     for subj, sdf in df.groupby("subj"):
-        stand = sdf[sdf.act == 7][["ax", "ay", "az"]].mean().to_numpy()
-        norm = float(np.linalg.norm(stand))
-        if norm < MIN_HANGING_NORM_G:
-            excluded[f"upfall:S{subj:02d}"] = round(norm, 2)
+        al = align_mounting(sdf[sdf.act == 7][["ax", "ay", "az"]].to_numpy(), "left")
+        if al.excluded:
+            excluded[f"upfall:S{subj:02d}"] = round(al.norm_g, 2)
             continue
-        rot = rot_align(stand, REFERENCE_HANGING_G)
         for (act, trial), tdf in sdf.groupby(["act", "trial"]):
             t = tdf["t"].to_numpy() - tdf["t"].iloc[0]
             keep = np.diff(t, prepend=-1.0) > 0
             tdf, t = tdf[keep], t[keep]
             if len(t) < 10:
                 continue
-            acc = tdf[["ax", "ay", "az"]].to_numpy() @ rot.T
-            gyro = tdf[["gx", "gy", "gz"]].to_numpy() * DEG @ rot.T
+            acc, gyro = al.apply(tdf[["ax", "ay", "az"]].to_numpy(), tdf[["gx", "gy", "gz"]].to_numpy() * DEG)
             grid = np.arange(int(t[-1] * FS) + 1) / FS
             fs_native = (len(t) - 1) / t[-1]
             is_fall = act <= 5
@@ -135,7 +129,6 @@ def load_erciyes(raw: Path) -> tuple[list[Recording], dict]:
     """
     root = raw / "erciyes" / "Tests"
     recs, excluded, missing, empty, too_nan, repaired = [], {}, 0, 0, 0, 0
-    ref_right = REFERENCE_HANGING_G * np.array([1.0, -1.0, 1.0])
     for sdir in sorted(p for p in root.iterdir() if p.is_dir()):
         sid = sdir.name
         exports = list(sdir.glob("*/Testler Export"))
@@ -167,14 +160,12 @@ def load_erciyes(raw: Path) -> tuple[list[Recording], dict]:
         if not walk:
             excluded[f"erciyes:{sid}"] = "no walking trials"
             continue
-        mean = np.concatenate(walk).mean(axis=0)
-        norm = float(np.linalg.norm(mean))
-        if norm < MIN_HANGING_NORM_G:
-            excluded[f"erciyes:{sid}"] = round(norm, 2)
+        al = align_mounting(np.concatenate(walk), "right")
+        if al.excluded:
+            excluded[f"erciyes:{sid}"] = round(al.norm_g, 2)
             continue
-        rot = rot_align(mean, ref_right)
         for code, test, acc, gyro in trials:
-            acc, gyro = mirror_right_to_left(acc @ rot.T, gyro @ rot.T)
+            acc, gyro = al.apply(acc, gyro)
             recs.append(_finish(
                 "erciyes", f"erciyes:{sid}", test, code, int(code) >= 900, acc, gyro, None,
             ))
@@ -200,7 +191,6 @@ def load_umafall(raw: Path) -> tuple[list[Recording], dict]:
     base = raw / "UMAFall_Dataset_corrected_version"
     if not base.is_dir():
         raise FileNotFoundError(base)
-    ref_right = REFERENCE_HANGING_G * np.array([1.0, -1.0, 1.0])
     by_subject: dict[str, list] = {}
     skipped = 0
     for f in sorted(base.glob("UMAFall_Subject_*.csv")):
@@ -222,12 +212,10 @@ def load_umafall(raw: Path) -> tuple[list[Recording], dict]:
         if not walk:
             excluded[f"umafall:{subj}"] = "no walking trials"
             continue
-        mean = np.concatenate(walk).mean(axis=0)
-        norm = float(np.linalg.norm(mean))
-        if norm < MIN_HANGING_NORM_G:
-            excluded[f"umafall:{subj}"] = round(norm, 2)
+        al = align_mounting(np.concatenate(walk), "right")
+        if al.excluded:
+            excluded[f"umafall:{subj}"] = round(al.norm_g, 2)
             continue
-        rot = rot_align(mean, ref_right)
         for kind, act, trial, a, g in items:
             ta = np.linspace(a.t.iloc[0], a.t.iloc[-1], len(a)) / 1000.0
             tg = np.linspace(g.t.iloc[0], g.t.iloc[-1], len(g)) / 1000.0
@@ -235,7 +223,7 @@ def load_umafall(raw: Path) -> tuple[list[Recording], dict]:
             grid = t0 + np.arange(int((t1 - t0) * FS) + 1) / FS
             acc = to_grid(ta, a[["x", "y", "z"]].to_numpy(), len(a) / (ta[-1] - ta[0]), grid)
             gyro = to_grid(tg, g[["x", "y", "z"]].to_numpy() * DEG, len(g) / (tg[-1] - tg[0]), grid)
-            acc, gyro = mirror_right_to_left(acc @ rot.T, gyro @ rot.T)
+            acc, gyro = al.apply(acc, gyro)
             recs.append(_finish(
                 "umafall", f"umafall:{subj}", f"T{trial}", act, kind == "Fall", acc, gyro, None,
             ))

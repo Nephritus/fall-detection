@@ -1,6 +1,6 @@
 """Free-living false-alarm rate on Capture-24 (wrist accelerometer worn ~24 h per person, labelled).
 
-Replaces the assumed time budgets of ``alarms.py`` with measured exposure: every 4 s window (2 s
+Replaces the assumed time budgets of ``budget_estimate.py`` with measured exposure: every 4 s window (2 s
 stride) of every participant is scored by the final models and alarm events are counted with the same
 refractory merge, per participant and per labelled activity (sleep included).
 
@@ -23,13 +23,12 @@ from concurrent.futures import ProcessPoolExecutor
 import numpy as np
 import pandas as pd
 import torch
-from scipy.signal import butter, sosfiltfilt
 
 from . import model as M
 from .alarms import REFRACTORY_S, FalseAlarms, per_day_ci
 from .augment import Augment
 from .baseline import choose_threshold, split_validation
-from .canonical import ACC_CLIP_G, FS, REFERENCE_HANGING_G, mirror_right_to_left, rot_align
+from .canonical import ACC_CLIP_G, FS, align_mounting, to_grid
 from .cli import PROCESSED, RAW, REPORTS
 from .threshold import balanced_threshold
 from .windows import STRIDE_S, WIN_S
@@ -44,9 +43,11 @@ OUT = PROCESSED / "capture24"
 RULES = ("val-slice", "lodo-pooled")
 
 
-def _to_left(acc: np.ndarray) -> np.ndarray:
-    """Accelerometer part of the right-to-left wrist mirror (``canonical.mirror_right_to_left``)."""
-    return mirror_right_to_left(acc, np.zeros_like(acc))[0]
+def _resample(x: np.ndarray) -> np.ndarray:
+    """100 Hz samples -> the canonical 25 Hz grid (anti-alias filter included), as for every source."""
+    t = np.arange(len(x)) / SRC_FS
+    return to_grid(t, x, SRC_FS, np.arange(int(t[-1] * FS) + 1) / FS)
+
 
 # --------------------------------------------------------------------------------- prepare
 def _prepare_one(args) -> dict:
@@ -66,17 +67,13 @@ def _prepare_one(args) -> dict:
     info["walk_s"] = len(walk) / SRC_FS
     if info["walk_s"] < MIN_WALK_S:
         return {**info, "excluded": f"walking {info['walk_s']:.0f} s"}
-    mean = walk.mean(axis=0)
-    info["walk_norm"] = float(np.linalg.norm(mean))
-    if info["walk_norm"] < MIN_WALK_NORM_G:
+    al = align_mounting(walk, "right", min_norm_g=MIN_WALK_NORM_G)  # free-living arm swing: see docstring
+    info["walk_norm"] = al.norm_g
+    if al.excluded:
         return {**info, "excluded": f"walking mean norm {info['walk_norm']:.2f} g"}
-    sos = butter(4, 0.4 * FS, btype="low", fs=SRC_FS, output="sos")
-    acc = sosfiltfilt(sos, xyz, axis=0)[:: SRC_FS // FS]
-    rot = rot_align(mean, REFERENCE_HANGING_G * np.array([1.0, -1.0, 1.0]))
-    acc = np.clip(_to_left(acc @ rot.T), -ACC_CLIP_G, ACC_CLIP_G).astype(np.float32)
+    acc = np.clip(al.apply(_resample(xyz))[0], -ACC_CLIP_G, ACC_CLIP_G).astype(np.float32)
     np.savez(OUT / f"{pid}.npz", acc=acc, lab=lab[:: SRC_FS // FS][: len(acc)])
-    wa = _to_left(sosfiltfilt(sos, walk, axis=0)[:: SRC_FS // FS] @ rot.T)
-    info["walk_axis_std"] = wa.std(axis=0).round(3).tolist()
+    info["walk_axis_std"] = al.apply(_resample(walk))[0].std(axis=0).round(3).tolist()
     return info
 
 
@@ -310,7 +307,7 @@ def write_report(prep, tab, thr, out, seeds, seconds, ms, tr, negatives=False, r
              "mounting is aligned per person from walking (direction only, norm ~0.7 g because of arm swing). "
              "(2) Only about 66% of the hours are labelled; the rest is shown as `unlabelled`. (3) A fall or "
              "near-fall that really happened would count as a false alarm here, since nothing marks it. (4) The "
-             "AX3 samples at 100 Hz and was low-passed with the same anti-alias filter as the real datasets and decimated to 25 Hz. "
+             "AX3 samples at 100 Hz and is resampled to 25 Hz by the same code path as the real datasets (`canonical.to_grid`). "
              "(5) 151 people × one day: day-to-day variation within a person is not measured.\n")
     if len(ex):
         L.append(f"Excluded participants: {len(ex)} ({'; '.join(f'{r.pid}: {r.excluded}' for r in ex.itertuples())}).\n")
