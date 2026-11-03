@@ -1,9 +1,9 @@
 """Train-time augmentation: synthetic variants of training windows, generated on the GPU per batch.
 
-Operates on model inputs ``(B, C, T)`` as built by ``model.make_inputs`` (scaled axes followed by
-magnitude channels), so every epoch sees fresh variants of every training window. Validation and
-test windows are never augmented. Each transform fires independently per window with probability
-``p``:
+Operates on canonical windows ``(B, T, C)`` in signal units (accelerometer in g, then gyroscope in rad/s
+when C = 6), so every epoch sees fresh variants of every training window; the model encodes the result.
+Validation and test windows are never augmented. Each transform fires independently per window with
+probability ``p``:
 
 * rotation: forearm roll about the x axis (the weakly constrained degree of freedom of the wrist
   frame) plus a small tilt about a random axis; applied identically to accel and gyro
@@ -22,7 +22,6 @@ import torch
 import torch.nn.functional as F
 
 from .canonical import ACC_CLIP_G, FS
-from .model import ACC_SCALE, GYRO_SCALE
 
 
 def _rotation(angle: torch.Tensor, axis: torch.Tensor) -> torch.Tensor:
@@ -51,10 +50,10 @@ class Augment:
     enabled: tuple[str, ...] = TRANSFORMS  # subset of TRANSFORMS; the rest are skipped (ablation)
 
     def __call__(self, x: torch.Tensor) -> torch.Tensor:
-        b, c, t = x.shape
+        b, t, c = x.shape
         dev = x.device
-        has_gyro = c == 8
-        sig = [x[:, 0:3] * ACC_SCALE] + ([x[:, 3:6] * GYRO_SCALE] if has_gyro else [])  # g, rad/s
+        has_gyro = c >= 6
+        sig = [x[:, :, 0:3].transpose(1, 2)] + ([x[:, :, 3:6].transpose(1, 2)] if has_gyro else [])  # (B, 3, T)
 
         def fire() -> torch.Tensor:
             return (torch.rand(b, device=dev) < self.p).float()
@@ -105,11 +104,5 @@ class Augment:
             if has_gyro:
                 sig[1] = sig[1] + noise * self.jitter_gyro * torch.randn_like(sig[1])
 
-        acc = sig[0].clamp(-ACC_CLIP_G, ACC_CLIP_G) / ACC_SCALE
-        parts = [acc]
-        mags = [acc.norm(dim=1, keepdim=True)]
-        if has_gyro:
-            gyro = sig[1] / GYRO_SCALE
-            parts.append(gyro)
-            mags.append(gyro.norm(dim=1, keepdim=True))
-        return torch.cat(parts + mags, dim=1)
+        sig[0] = sig[0].clamp(-ACC_CLIP_G, ACC_CLIP_G)  # augmented windows stay valid canonical signals
+        return torch.cat(sig, dim=1).transpose(1, 2).contiguous()

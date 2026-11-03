@@ -20,15 +20,13 @@ import numpy as np
 import pandas as pd
 import torch
 
-from . import model as M
+from .model import FallModel
 from .alarms import REFRACTORY_S, FalseAlarms, per_day_ci
 from .augment import Augment
 from .baseline import choose_threshold, split_validation
-from .canonical import FS
 from .capture24 import Capture24
 from .cli import PROCESSED, RAW, REPORTS
 from .threshold import balanced_threshold
-from .windows import STRIDE_S, WIN_S
 
 OUT = PROCESSED / "capture24"
 SOURCE = Capture24(OUT)
@@ -49,32 +47,31 @@ def fit_models(seeds: int, root=OUT, extra=None) -> pd.DataFrame:
     X = np.load(PROCESSED / "X.npy")
     meta = pd.read_csv(PROCESSED / "meta.csv")
     y = meta.label.to_numpy().astype(np.int64)
-    x = M.make_inputs(X, "acc")
+    x = X[:, :, :3]
     aug = Augment()
     datasets = sorted(meta.dataset.unique())
-    ones = lambda n: np.ones(n, np.float32)  # noqa: E731
     rows, t0 = [], time.time()
     for seed in range(seeds):
-        xn, xnv = (M.make_inputs(w, "acc") for w in extra(seed)) if extra else (x[:0], x[:0])
+        xn, xnv = extra(seed) if extra else (x[:0], x[:0])
 
         def fit(tr_idx, va_idx):
             xt = np.concatenate([x[tr_idx], xn])
             yt = np.concatenate([y[tr_idx], np.zeros(len(xn), np.int64)])
             xv = np.concatenate([x[va_idx], xnv])
             yv = np.concatenate([y[va_idx], np.zeros(len(xnv), np.int64)])
-            return M.fit(xt, yt, ones(len(xt)), xv, yv, seed, augment=aug)
+            return FallModel.train(xt, yt, xv, yv, channels="acc", seed=seed, augment=aug)
 
         tr, va = split_validation(meta, np.arange(len(meta)), seed)
         net = fit(tr, va)
-        thr = {"val-slice": choose_threshold(M.predict_proba(net, x[va]), y[va])}
-        torch.save(net.state_dict(), root / "models" / f"seed{seed}.pt")
+        thr = {"val-slice": choose_threshold(net.scores(x[va]), y[va])}
+        net.save(root / "models" / f"seed{seed}.pt")
         del net
         falls, fall_scores = [], {}
         for s in datasets:  # nested leave-one-dataset-out, as in threshold.py
             s_idx = np.where(meta.dataset == s)[0]
             itr, iva = split_validation(meta, np.where(meta.dataset != s)[0], seed)
             inet = fit(itr, iva)
-            fs_ = M.predict_proba(inet, x[s_idx])[y[s_idx] == 1]
+            fs_ = inet.scores(x[s_idx])[y[s_idx] == 1]
             falls.append(fs_)
             fall_scores[s] = fs_
             del inet
@@ -89,36 +86,17 @@ def fit_models(seeds: int, root=OUT, extra=None) -> pd.DataFrame:
 
 
 # ------------------------------------------------------------------------------------ score
-@torch.no_grad()
-def score_signal(net: M.FallCNN, acc: np.ndarray, chunk: int = 16384) -> np.ndarray:
-    """Probability for every 4 s window (2 s stride) of one participant's signal."""
-    dev = M.device()
-    win, stride = round(WIN_S * FS), round(STRIDE_S * FS)
-    a = torch.from_numpy(acc).unfold(0, win, stride)  # (nw, 3, win), a view
-    out = []
-    for i in range(0, len(a), chunk):
-        w = a[i : i + chunk].to(dev)
-        mag = w.norm(dim=1, keepdim=True)
-        inp = torch.cat([w / M.ACC_SCALE, mag / M.ACC_SCALE], dim=1)
-        out.append(torch.sigmoid(net(inp)).cpu())
-    return torch.cat(out).numpy()
-
-
 def score_all(seeds: int, pids: list[str], root=OUT) -> None:
     sp = root / "scores"
     sp.mkdir(exist_ok=True)
-    nets = []
-    for s in range(seeds):
-        n = M.FallCNN(4).to(M.device())
-        n.load_state_dict(torch.load(root / "models" / f"seed{s}.pt"))
-        nets.append(n.eval())
+    nets = [FallModel.load(root / "models" / f"seed{s}.pt", "acc") for s in range(seeds)]
     t0 = time.time()
     for i, pid in enumerate(pids):
         f = sp / f"{pid}.npy"
         if f.exists() and np.load(f, mmap_mode="r").shape[0] >= seeds:
             continue
         acc = SOURCE.signal(pid)
-        np.save(f, np.stack([score_signal(n, acc) for n in nets]).astype(np.float32))
+        np.save(f, np.stack([n.score_signal(acc) for n in nets]).astype(np.float32))
         if i % 20 == 0:
             print(f"[score] {i + 1}/{len(pids)} ({time.time() - t0:.0f}s)", flush=True)
 
@@ -136,11 +114,7 @@ MOUNTINGS = {"as assumed": (0, False), "roll +30°": (30, False), "roll -30°": 
 
 def mounting_sensitivity(pids: list[str], thr: pd.DataFrame, seeds: int, refractory: float, root=OUT) -> pd.DataFrame:
     """Events/24 h when the assumed mounting is wrong: forearm-roll offsets and the wrong wrist side."""
-    nets = []
-    for s in range(seeds):
-        n = M.FallCNN(4).to(M.device())
-        n.load_state_dict(torch.load(root / "models" / f"seed{s}.pt"))
-        nets.append(n.eval())
+    nets = [FallModel.load(root / "models" / f"seed{s}.pt", "acc") for s in range(seeds)]
     sub = pids[:: max(1, len(pids) // 40)]  # ~40 participants keep this affordable
     rows = []
     for pid in sub:
@@ -149,7 +123,7 @@ def mounting_sensitivity(pids: list[str], thr: pd.DataFrame, seeds: int, refract
             a = acc0 * np.array([1.0, -1.0, 1.0], np.float32) if unmirror else acc0
             a = np.ascontiguousarray(a @ _roll(deg).T)
             for seed in range(seeds):
-                fa = FalseAlarms.from_window_scores([score_signal(nets[seed], a)], refractory=refractory)
+                fa = FalseAlarms.from_window_scores([nets[seed].score_signal(a)], refractory=refractory)
                 for rule in RULES:
                     t = thr[(thr.seed == seed) & (thr.rule == rule)].threshold.iloc[0]
                     rows.append({"mounting": name, "rule": rule, "seed": seed, "pid": pid,

@@ -20,6 +20,7 @@ from . import model as M
 from .augment import Augment
 from .canonical import FS
 from .cli import PROCESSED, REPORTS
+from .model import FallModel
 from .reference import ThresholdReference
 from .windows import STRIDE_S
 
@@ -71,30 +72,30 @@ def metrics(y: np.ndarray, pred: np.ndarray, score: np.ndarray | None) -> dict:
 
 
 # --------------------------------------------------------------------------------- folds
-def run_fold(X, meta, y, train_idx, test_idx, channels, seed, xin_cache, augment=None):
+def run_fold(X, meta, y, train_idx, test_idx, channels, seed, augment=None):
     """Train CNN stage 1 and stage 2 (after mining) on one split; return metric rows + predictions."""
     tr, va = split_validation(meta, train_idx, seed)
-    xin = xin_cache[channels]
     out, preds = [], {}
-    weights = np.ones(len(tr), dtype=np.float32)
+    weights = None
     mined = 0
     for stage in ("stage1", "stage2"):
-        net = M.fit(xin[tr], y[tr], weights, xin[va], y[va], seed, augment=augment)
-        thr = choose_threshold(M.predict_proba(net, xin[va]), y[va])
-        p_test = M.predict_proba(net, xin[test_idx])
+        net = FallModel.train(X[tr], y[tr], X[va], y[va], channels=channels, seed=seed, augment=augment,
+                              weights=weights)
+        thr = choose_threshold(net.scores(X[va]), y[va])
+        p_test = net.scores(X[test_idx])
         out.append({
             "model": "cnn", "channels": channels, "stage": stage, "threshold": thr, "mined": mined,
-            "params": M.n_params(net), **metrics(y[test_idx], (p_test >= thr).astype(int), p_test),
+            "params": net.n_params, **metrics(y[test_idx], (p_test >= thr).astype(int), p_test),
         })
         preds[stage] = (p_test, thr)
         if stage == "stage1":
-            weights, mined = mine_hard_negatives(xin, y, meta, tr, va, seed, augment=augment)
+            weights, mined = mine_hard_negatives(X, channels, y, meta, tr, va, seed, augment=augment)
         del net
         torch.cuda.empty_cache()
     return out, preds
 
 
-def mine_hard_negatives(xin, y, meta, tr, va, seed, folds: int = 3, augment=None):
+def mine_hard_negatives(X, channels, y, meta, tr, va, seed, folds: int = 3, augment=None):
     """Out-of-fold hard negative mining. Training subjects are split into ``folds`` groups; a model
     trained on the other groups scores the held-out group, and ADL windows that fire at that
     model's own >=95%-sensitivity threshold are hard negatives (the in-sample model would rarely
@@ -104,12 +105,12 @@ def mine_hard_negatives(xin, y, meta, tr, va, seed, folds: int = 3, augment=None
     names = np.array(sorted(subs.unique()))
     np.random.default_rng(seed + 1000).shuffle(names)
     hard_local, hard_scores = [], []
-    ones = lambda n: np.ones(n, dtype=np.float32)  # noqa: E731
     for part in np.array_split(names, folds):
         held = subs.isin(part).to_numpy()
-        net = M.fit(xin[tr[~held]], y[tr[~held]], ones((~held).sum()), xin[va], y[va], seed, augment=augment)
-        thr = choose_threshold(M.predict_proba(net, xin[va]), y[va])
-        p = M.predict_proba(net, xin[tr[held]])
+        net = FallModel.train(X[tr[~held]], y[tr[~held]], X[va], y[va], channels=channels, seed=seed,
+                              augment=augment)
+        thr = choose_threshold(net.scores(X[va]), y[va])
+        p = net.scores(X[tr[held]])
         idx = np.where(held)[0]
         fire = (y[tr[idx]] == 0) & (p >= thr)
         hard_local += list(idx[fire])
@@ -119,7 +120,7 @@ def mine_hard_negatives(xin, y, meta, tr, va, seed, folds: int = 3, augment=None
     hard = np.array(hard_local, dtype=int)
     cap = int(MINE_THRESHOLD_CAP * (y[tr] == 0).sum())
     hard = hard[np.argsort(-np.array(hard_scores))][:cap] if len(hard) else hard
-    weights = ones(len(tr))
+    weights = np.ones(len(tr), dtype=np.float32)
     weights[hard] = MINE_WEIGHT
     return weights, len(hard)
 
@@ -140,7 +141,6 @@ def run(seeds: int = 3, augment: bool = False) -> None:
     meta = pd.read_csv(PROCESSED / "meta.csv")
     y = meta.label.to_numpy().astype(np.int64)
     prep = json.loads((PROCESSED / "prepare_log.json").read_text())
-    xin_cache = {c: M.make_inputs(X, c) for c in ("imu", "acc")}
     aug = Augment() if augment else None
     datasets = sorted(meta.dataset.unique())
     print(f"{len(X)} windows, {int(y.sum())} fall; datasets {datasets}; device {M.device()}")
@@ -157,7 +157,7 @@ def run(seeds: int = 3, augment: bool = False) -> None:
             test = np.where(meta.dataset == d)[0]
             train = np.where(meta.dataset != d)[0]
             for ch in ("imu", "acc"):
-                res, preds = run_fold(X, meta, y, train, test, ch, seed, xin_cache, aug)
+                res, preds = run_fold(X, meta, y, train, test, ch, seed, aug)
                 add("lodo", d, seed, res)
                 if ch == "imu":
                     for stage, (p, thr) in preds.items():
@@ -175,7 +175,7 @@ def run(seeds: int = 3, augment: bool = False) -> None:
         gkf = GroupKFold(n_splits=5, shuffle=True, random_state=seed)
         for k, (train, test) in enumerate(gkf.split(X, y, groups=meta.subject)):
             for ch in ("imu", "acc"):
-                res, _ = run_fold(X, meta, y, train, test, ch, seed, xin_cache, aug)
+                res, _ = run_fold(X, meta, y, train, test, ch, seed, aug)
                 add("cv", f"fold{k}", seed, res)
             row, _ = run_reference(X, meta, y, train, test)
             add("cv", f"fold{k}", seed, [row])

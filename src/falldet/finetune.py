@@ -15,10 +15,10 @@ import numpy as np
 import pandas as pd
 import torch
 
-from . import model as M
 from .augment import Augment
 from .baseline import choose_threshold, metrics, split_validation
 from .cli import PROCESSED, REPORTS
+from .model import FallModel
 
 K_VALUES = (1, 2, 4)
 METHODS = ("zero-shot", "recalibrated", "adabn", "head-only", "full", "scratch")
@@ -48,7 +48,6 @@ def run(seeds: int = 3, augment: bool = False) -> None:
     X = np.load(PROCESSED / "X.npy")
     meta = pd.read_csv(PROCESSED / "meta.csv")
     y = meta.label.to_numpy().astype(np.int64)
-    xin = {c: M.make_inputs(X, c) for c in ("imu", "acc")}
     aug = Augment() if augment else None
     rows = []
     for seed in range(seeds):
@@ -57,12 +56,11 @@ def run(seeds: int = 3, augment: bool = False) -> None:
             src = np.where(meta.dataset != ds)[0]
             tr, va = split_validation(meta, src, seed)
             for ch in ("imu", "acc"):
-                x = xin[ch]
-                base = M.fit(x[tr], y[tr], np.ones(len(tr), np.float32), x[va], y[va], seed, augment=aug)
-                thr_src = choose_threshold(M.predict_proba(base, x[va]), y[va])
+                base = FallModel.train(X[tr], y[tr], X[va], y[va], channels=ch, seed=seed, augment=aug)
+                thr_src = choose_threshold(base.scores(X[va]), y[va])
 
                 def record(method, k, net, thr, n_ft=0, n_ft_fall=0):
-                    p = M.predict_proba(net, x[ev_idx])
+                    p = net.scores(X[ev_idx])
                     rows.append({
                         "seed": seed, "dataset": ds, "channels": ch, "k": k, "method": method,
                         "threshold": thr, "ft_windows": n_ft, "ft_falls": n_ft_fall,
@@ -81,16 +79,16 @@ def run(seeds: int = 3, augment: bool = False) -> None:
                         continue
                     n_ft, n_f = len(ft), int(y[ft].sum())
                     record("zero-shot", k, base, thr_src)
-                    thr = choose_threshold(M.predict_proba(base, x[cal]), y[cal])
+                    thr = choose_threshold(base.scores(X[cal]), y[cal])
                     record("recalibrated", k, base, thr)
-                    ada = M.adapt_batchnorm(base, x[pool_all])
-                    record("adabn", k, ada, choose_threshold(M.predict_proba(ada, x[cal]), y[cal]))
-                    w = np.ones(len(ft), np.float32)
+                    ada = base.adapt_batchnorm(X[pool_all])
+                    record("adabn", k, ada, choose_threshold(ada.scores(X[cal]), y[cal]))
                     for name, freeze in (("head-only", True), ("full", False)):
-                        net = M.finetune(base, x[ft], y[ft], x[cal], y[cal], seed, freeze, augment=aug)
-                        record(name, k, net, choose_threshold(M.predict_proba(net, x[cal]), y[cal]), n_ft, n_f)
-                    sc = M.fit(x[ft], y[ft], w, x[cal], y[cal], seed, augment=aug)
-                    record("scratch", k, sc, choose_threshold(M.predict_proba(sc, x[cal]), y[cal]), n_ft, n_f)
+                        net = base.continue_training(X[ft], y[ft], X[cal], y[cal], seed=seed, freeze_features=freeze,
+                                                     augment=aug)
+                        record(name, k, net, choose_threshold(net.scores(X[cal]), y[cal]), n_ft, n_f)
+                    sc = FallModel.train(X[ft], y[ft], X[cal], y[cal], channels=ch, seed=seed, augment=aug)
+                    record("scratch", k, sc, choose_threshold(sc.scores(X[cal]), y[cal]), n_ft, n_f)
                 del base
                 torch.cuda.empty_cache()
             print(f"[seed {seed}] {ds} done ({time.time() - t0:.0f}s)", flush=True)

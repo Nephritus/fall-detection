@@ -21,10 +21,10 @@ import numpy as np
 import pandas as pd
 import torch
 
-from . import model as M
 from .augment import Augment
 from .baseline import choose_threshold, metrics, split_validation
 from .cli import PROCESSED, REPORTS
+from .model import FallModel
 
 COLS = ["sensitivity", "false_alarms_per_h", "auroc", "ap", "fa_h_at_95sens_oracle"]
 LOWER = {"false_alarms_per_h", "fa_h_at_95sens_oracle"}
@@ -33,17 +33,16 @@ CONDITIONS = ["real", "mix-25", "mix-100", "mix-adl", "mix-fall", "synth-only", 
 REFERENCE = {c: ("real-noaug" if c.endswith("noaug") else "real") for c in CONDITIONS}
 
 
-def train(cond: str, seed: int, xr, yr, tr, va, xs, ys, aug) -> M.FallCNN:
+def train(cond: str, seed: int, xr, yr, tr, va, xs, ys, aug, channels: str) -> FallModel:
     """Train one model for ``cond``; ``tr``/``va`` index the real arrays ``xr``/``yr``."""
     rng = np.random.default_rng(seed + 500)
     a = None if cond.endswith("noaug") else aug
-    ones = lambda n: np.ones(n, np.float32)  # noqa: E731
     if cond == "synth-only":
-        return M.fit(xs, ys, ones(len(xs)), xr[va], yr[va], seed, augment=a)
+        return FallModel.train(xs, ys, xr[va], yr[va], channels=channels, seed=seed, augment=a)
     if cond == "pretrain-ft":
-        base = M.fit(xs, ys, ones(len(xs)), xr[va], yr[va], seed, augment=a)
-        return M.finetune(base, xr[tr], yr[tr], xr[va], yr[va], seed, freeze_features=False,
-                          lr=1e-3, batch=256, max_epochs=40, patience=6, augment=a)
+        base = FallModel.train(xs, ys, xr[va], yr[va], channels=channels, seed=seed, augment=a)
+        return base.continue_training(xr[tr], yr[tr], xr[va], yr[va], seed=seed, freeze_features=False,
+                                      lr=1e-3, batch=256, max_epochs=40, patience=6, augment=a)
     x, y = xr[tr], yr[tr]
     if cond.startswith("mix"):
         keep = np.ones(len(xs), bool)
@@ -54,7 +53,7 @@ def train(cond: str, seed: int, xr, yr, tr, va, xs, ys, aug) -> M.FallCNN:
         elif cond == "mix-fall":
             keep = ys == 1
         x, y = np.concatenate([x, xs[keep]]), np.concatenate([y, ys[keep]])
-    return M.fit(x, y, ones(len(x)), xr[va], yr[va], seed, augment=a)
+    return FallModel.train(x, y, xr[va], yr[va], channels=channels, seed=seed, augment=a)
 
 
 def run(seeds: int = 8, channels: str = "acc") -> None:
@@ -62,8 +61,8 @@ def run(seeds: int = 8, channels: str = "acc") -> None:
     X = np.load(PROCESSED / "X.npy")
     meta = pd.read_csv(PROCESSED / "meta.csv")
     y = meta.label.to_numpy().astype(np.int64)
-    xr = M.make_inputs(X, channels)
-    xs = M.make_inputs(np.load(PROCESSED / "synthetic_X.npy"), channels)
+    xr = X
+    xs = np.load(PROCESSED / "synthetic_X.npy")
     ys = pd.read_csv(PROCESSED / "synthetic_meta.csv").label.to_numpy().astype(np.int64)
     datasets = sorted(meta.dataset.unique())
     aug = Augment()
@@ -79,9 +78,9 @@ def run(seeds: int = 8, channels: str = "acc") -> None:
             for d in datasets:
                 test = np.where(meta.dataset == d)[0]
                 tr, va = split_validation(meta, np.where(meta.dataset != d)[0], seed)
-                net = train(cond, seed, xr, y, tr, va, xs, ys, aug)
-                thr = choose_threshold(M.predict_proba(net, xr[va]), y[va])
-                p = M.predict_proba(net, xr[test])
+                net = train(cond, seed, xr, y, tr, va, xs, ys, aug, channels)
+                thr = choose_threshold(net.scores(xr[va]), y[va])
+                p = net.scores(xr[test])
                 rows.append({"cond": cond, "seed": seed, "fold": d,
                              **metrics(y[test], (p >= thr).astype(int), p)})
                 del net

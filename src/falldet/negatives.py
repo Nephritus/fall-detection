@@ -30,13 +30,13 @@ import numpy as np
 import pandas as pd
 import torch
 
-from . import model as M
+from .model import FallModel
 from .alarms import REFRACTORY_S, FalseAlarms, per_day_ci, sensitivity_at_budget
 from .augment import Augment
 from .baseline import choose_threshold, metrics, split_validation
 from .canonical import FS
 from .cli import PROCESSED, REPORTS
-from .freeliving import OUT, SOURCE, score_signal
+from .freeliving import OUT, SOURCE
 RANDOM_K = 1500  # Capture-24 windows added per training participant
 MINED_FRACTION = 2 / 3
 VAL_K = 800  # random windows per Capture-24 validation participant
@@ -45,16 +45,11 @@ CONDITIONS = ("real", "c24-random", "c24-mined")
 
 
 # --------------------------------------------------------------------------------- windows
-def encode(w: np.ndarray) -> np.ndarray:
-    """Canonical accelerometer windows -> accel-only model inputs."""
-    return M.make_inputs(w, "acc")
-
-
-def mined_windows(net: M.FallCNN, pids: list[str], k: int, sep: int = 3) -> np.ndarray:
+def mined_windows(net: FallModel, pids: list[str], k: int, sep: int = 3) -> np.ndarray:
     """Top-scoring windows per participant under ``net`` (greedy, ``sep`` windows apart)."""
     out = []
     for pid in pids:
-        sc = score_signal(net, SOURCE.signal(pid))
+        sc = net.score_signal(SOURCE.signal(pid))
         taken = np.zeros(len(sc), bool)
         pick = []
         for i in np.argsort(-sc)[: k * 10]:
@@ -78,9 +73,9 @@ def free_living(scores: list[np.ndarray], fall_scores: np.ndarray, val_thr: floa
 
 # --------------------------------------------------------------------------------- driver
 def evaluate(net, cond, x, y, test_idx, va, val_thr, test_acc):
-    p = M.predict_proba(net, x[test_idx])
+    p = net.scores(x[test_idx])
     lab = metrics(y[test_idx], (p >= val_thr).astype(int), p)
-    scores = [score_signal(net, a) for a in test_acc]
+    scores = [net.score_signal(a) for a in test_acc]
     fl, curve = free_living(scores, p[y[test_idx] == 1], val_thr)
     row = {"cond": cond, "threshold": val_thr, **{k: lab[k] for k in
            ("sensitivity", "false_alarms_per_h", "auroc", "ap", "fa_h_at_95sens_oracle")}, **fl}
@@ -92,14 +87,13 @@ def run(seed: int) -> None:
     X = np.load(PROCESSED / "X.npy")
     meta = pd.read_csv(PROCESSED / "meta.csv")
     y = meta.label.to_numpy().astype(np.int64)
-    x = M.make_inputs(X, "acc")
+    x = X[:, :, :3]
     aug = Augment()
     people = SOURCE.split(seed)
     test_acc = [SOURCE.signal(p) for p in people.held_out]
     print(f"seed {seed}: C24 train {len(people.train)}, val {len(people.validation)}, test {len(people.held_out)} "
           f"participants ({sum(len(a) for a in test_acc) / FS / 3600:.0f} h)", flush=True)
-    x_c24_val = encode(SOURCE.windows(people.validation, VAL_K, seed, "validation"))
-    ones = lambda n: np.ones(n, np.float32)  # noqa: E731
+    x_c24_val = SOURCE.windows(people.validation, VAL_K, seed, "validation")
     rows, curves = [], {}
     out = REPORTS / "negatives"
     out.mkdir(parents=True, exist_ok=True)
@@ -107,23 +101,23 @@ def run(seed: int) -> None:
         test = np.where(meta.dataset == ds)[0]
         tr, va = split_validation(meta, np.where(meta.dataset != ds)[0], seed)
         xv, yv = x[va], y[va]
-        net = M.fit(x[tr], y[tr], ones(len(tr)), xv, yv, seed, augment=aug)
-        thr = choose_threshold(M.predict_proba(net, xv), yv)
+        net = FallModel.train(x[tr], y[tr], xv, yv, channels="acc", seed=seed, augment=aug)
+        thr = choose_threshold(net.scores(xv), yv)
         row, cv = evaluate(net, "real", x, y, test, va, thr, test_acc)
         rows.append({"seed": seed, "fold": ds, **row})
         curves.update({f"{ds}|real|{k}": v for k, v in cv.items()})
-        xc_rand = encode(SOURCE.windows(people.train, RANDOM_K, seed, "train", ds))
+        xc_rand = SOURCE.windows(people.train, RANDOM_K, seed, "train", ds)
         n_mined = round(RANDOM_K * MINED_FRACTION)
-        xc_mix = encode(np.concatenate([SOURCE.windows(people.train, RANDOM_K - n_mined, seed, "mined-random", ds),
-                                        mined_windows(net, people.train, n_mined)]))
+        xc_mix = np.concatenate([SOURCE.windows(people.train, RANDOM_K - n_mined, seed, "mined-random", ds),
+                                 mined_windows(net, people.train, n_mined)])
         del net
         xvc = np.concatenate([xv, x_c24_val])
         yvc = np.concatenate([yv, np.zeros(len(x_c24_val), np.int64)])
         for cond, xc in (("c24-random", xc_rand), ("c24-mined", xc_mix)):
             xt = np.concatenate([x[tr], xc])
             yt = np.concatenate([y[tr], np.zeros(len(xc), np.int64)])
-            net = M.fit(xt, yt, ones(len(xt)), xvc, yvc, seed, augment=aug)
-            thr = choose_threshold(M.predict_proba(net, xv), yv)  # falls only matter for the threshold
+            net = FallModel.train(xt, yt, xvc, yvc, channels="acc", seed=seed, augment=aug)
+            thr = choose_threshold(net.scores(xv), yv)  # falls only matter for the threshold
             row, cv = evaluate(net, cond, x, y, test, va, thr, test_acc)
             rows.append({"seed": seed, "fold": ds, **row})
             curves.update({f"{ds}|{cond}|{k}": v for k, v in cv.items()})
@@ -290,11 +284,11 @@ def scale(seed: int, ks: tuple[int, ...] = SCALE_KS) -> None:
     X = np.load(PROCESSED / "X.npy")
     meta = pd.read_csv(PROCESSED / "meta.csv")
     y = meta.label.to_numpy().astype(np.int64)
-    x = M.make_inputs(X, "acc")
+    x = X[:, :, :3]
     aug = Augment()
     people = SOURCE.split(seed)
     test_acc = [SOURCE.signal(p) for p in people.held_out]
-    x_c24_val = encode(SOURCE.windows(people.validation, VAL_K, seed, "validation"))
+    x_c24_val = SOURCE.windows(people.validation, VAL_K, seed, "validation")
     out = REPORTS / "negatives" / "scale"
     out.mkdir(parents=True, exist_ok=True)
     for k in ks:
@@ -305,15 +299,15 @@ def scale(seed: int, ks: tuple[int, ...] = SCALE_KS) -> None:
             test = np.where(meta.dataset == ds)[0]
             tr, va = split_validation(meta, np.where(meta.dataset != ds)[0], seed)
             xv, yv = x[va], y[va]
-            xc = encode(SOURCE.windows(people.train, k, seed, "train", ds))
+            xc = SOURCE.windows(people.train, k, seed, "train", ds)
             xt = np.concatenate([x[tr], xc])
             yt = np.concatenate([y[tr], np.zeros(len(xc), np.int64)])
             del xc
             xvc = np.concatenate([xv, x_c24_val])
             yvc = np.concatenate([yv, np.zeros(len(x_c24_val), np.int64)])
-            net = M.fit(xt, yt, np.ones(len(xt), np.float32), xvc, yvc, seed, augment=aug)
+            net = FallModel.train(xt, yt, xvc, yvc, channels="acc", seed=seed, augment=aug)
             del xt
-            thr = choose_threshold(M.predict_proba(net, xv), yv)
+            thr = choose_threshold(net.scores(xv), yv)
             row, cv = evaluate(net, f"c24-random-{k}", x, y, test, va, thr, test_acc)
             np.savez(out / f"seed{seed}_K{k}_{ds}.npz", **cv)
             pd.DataFrame([{"seed": seed, "fold": ds, "K": k, **row}]).to_csv(f, index=False)

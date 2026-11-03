@@ -26,11 +26,11 @@ import pandas as pd
 import torch
 from scipy.stats import gamma
 
-from . import model as M
 from .alarms import REFRACTORY_S, FalseAlarms
 from .augment import Augment
 from .baseline import choose_threshold, split_validation
 from .cli import PROCESSED, REPORTS
+from .model import FallModel
 from .threshold import balanced_threshold
 from .windows import WIN_S
 
@@ -84,26 +84,24 @@ def score(seeds: int) -> tuple[pd.DataFrame, pd.DataFrame]:
     X = np.load(PROCESSED / "X.npy")
     meta = pd.read_csv(PROCESSED / "meta.csv")
     y = meta.label.to_numpy().astype(np.int64)
-    x = M.make_inputs(X, "acc")
     aug = Augment()
     datasets = sorted(meta.dataset.unique())
-    ones = lambda n: np.ones(n, np.float32)  # noqa: E731
     sc, th = [], []
     for seed in range(seeds):
         for ds in datasets:
             test = np.where(meta.dataset == ds)[0]
             src = np.where(meta.dataset != ds)[0]
             tr, va = split_validation(meta, src, seed)
-            net = M.fit(x[tr], y[tr], ones(len(tr)), x[va], y[va], seed, augment=aug)
-            thr = {"val-slice": choose_threshold(M.predict_proba(net, x[va]), y[va])}
-            p = M.predict_proba(net, x[test])
+            net = FallModel.train(X[tr], y[tr], X[va], y[va], channels="acc", seed=seed, augment=aug)
+            thr = {"val-slice": choose_threshold(net.scores(X[va]), y[va])}
+            p = net.scores(X[test])
             del net
             falls = []
             for s in sorted(set(datasets) - {ds}):
                 s_idx = np.where(meta.dataset == s)[0]
                 itr, iva = split_validation(meta, np.where(~meta.dataset.isin([ds, s]))[0], seed)
-                inet = M.fit(x[itr], y[itr], ones(len(itr)), x[iva], y[iva], seed, augment=aug)
-                ps = M.predict_proba(inet, x[s_idx])
+                inet = FallModel.train(X[itr], y[itr], X[iva], y[iva], channels="acc", seed=seed, augment=aug)
+                ps = inet.scores(X[s_idx])
                 falls.append(ps[y[s_idx] == 1])
                 del inet
                 torch.cuda.empty_cache()

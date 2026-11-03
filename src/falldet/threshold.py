@@ -26,11 +26,11 @@ import numpy as np
 import pandas as pd
 import torch
 
-from . import model as M
 from .augment import Augment
 from .baseline import TARGET_SENSITIVITY, choose_threshold, metrics, split_validation
 from .cli import PROCESSED, REPORTS
 from .finetune import split_target
+from .model import FallModel
 from .windows import STRIDE_S
 
 BUDGETS = (10, 25, 50)  # false alarms per hour
@@ -58,10 +58,8 @@ def run(seeds: int = 3, augment: bool = False) -> None:
     X = np.load(PROCESSED / "X.npy")
     meta = pd.read_csv(PROCESSED / "meta.csv")
     y = meta.label.to_numpy().astype(np.int64)
-    xin = {c: M.make_inputs(X, c) for c in ("imu", "acc")}
     aug = Augment() if augment else None
     datasets = sorted(meta.dataset.unique())
-    ones = lambda n: np.ones(n, np.float32)  # noqa: E731
     rows = []
     for seed in range(seeds):
         for ds in datasets:
@@ -71,10 +69,9 @@ def run(seeds: int = 3, augment: bool = False) -> None:
             src = np.where(meta.dataset != ds)[0]
             tr, va = split_validation(meta, src, seed)
             for ch in ("imu", "acc"):
-                x = xin[ch]
-                net = M.fit(x[tr], y[tr], ones(len(tr)), x[va], y[va], seed, augment=aug)
-                p_ev, p_pool = M.predict_proba(net, x[ev_idx]), M.predict_proba(net, x[pool_idx])
-                thr = {"val-slice": choose_threshold(M.predict_proba(net, x[va]), y[va])}
+                net = FallModel.train(X[tr], y[tr], X[va], y[va], channels=ch, seed=seed, augment=aug)
+                p_ev, p_pool = net.scores(X[ev_idx]), net.scores(X[pool_idx])
+                thr = {"val-slice": choose_threshold(net.scores(X[va]), y[va])}
                 del net
                 # nested leave-one-dataset-out over the training datasets
                 per_ds_fall_scores, per_ds_thr = [], []
@@ -82,8 +79,8 @@ def run(seeds: int = 3, augment: bool = False) -> None:
                     s_idx = np.where(meta.dataset == s)[0]
                     inner = np.where(~meta.dataset.isin([ds, s]))[0]
                     itr, iva = split_validation(meta, inner, seed)
-                    inet = M.fit(x[itr], y[itr], ones(len(itr)), x[iva], y[iva], seed, augment=aug)
-                    ps = M.predict_proba(inet, x[s_idx])
+                    inet = FallModel.train(X[itr], y[itr], X[iva], y[iva], channels=ch, seed=seed, augment=aug)
+                    ps = inet.scores(X[s_idx])
                     fall = ps[y[s_idx] == 1]
                     per_ds_fall_scores.append(fall)
                     per_ds_thr.append(choose_threshold(ps, y[s_idx]))

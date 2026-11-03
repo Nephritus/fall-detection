@@ -28,15 +28,15 @@ from scipy.signal import find_peaks
 from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.metrics import roc_auc_score
 
-from . import model as M
+from .model import FallModel
 from .alarms import REFRACTORY_S, FalseAlarms
 from .augment import Augment
 from .baseline import choose_threshold, split_validation
 from .canonical import FS
 from .cli import PROCESSED, RAW, REPORTS
 from .capture24 import LABEL_NAMES
-from .freeliving import OUT, SOURCE, score_signal
-from .negatives import RANDOM_K, VAL_K, encode
+from .freeliving import OUT, SOURCE
+from .negatives import RANDOM_K, VAL_K
 from .windows import STRIDE_S, WIN_S
 
 TRIGGER_G, MIN_SEP_S = 2.0, 2.0
@@ -210,11 +210,11 @@ def run(seed: int) -> None:
     X = np.load(PROCESSED / "X.npy")
     meta = pd.read_csv(PROCESSED / "meta.csv")
     y = meta.label.to_numpy().astype(np.int64)
-    x = M.make_inputs(X, "acc")
+    x = X[:, :, :3]
     aug = Augment()
     split = SOURCE.split(seed)
     test_p, fit_p, val_p = split.held_out, split.train, split.validation
-    x_c24_val = encode(SOURCE.windows(val_p, VAL_K, seed, "validation"))
+    x_c24_val = SOURCE.windows(val_p, VAL_K, seed, "validation")
     pids = SOURCE.people()
     people = load_people(pids)
     lab = pd.read_pickle(CACHE / "lab.pkl")
@@ -242,15 +242,15 @@ def run(seed: int) -> None:
         tr, va = split_validation(meta, src, seed)
         val_subj = set(meta.subject.iloc[va])
         # ---- stage 1: the same Capture-24 negatives as negatives.run's c24-random condition for this fold
-        xc = encode(SOURCE.windows(fit_p, RANDOM_K, seed, "train", ds))
+        xc = SOURCE.windows(fit_p, RANDOM_K, seed, "train", ds)
         xt = np.concatenate([x[tr], xc])
         yt = np.concatenate([y[tr], np.zeros(len(xc), np.int64)])
         xvc = np.concatenate([x[va], x_c24_val])
         yvc = np.concatenate([y[va], np.zeros(len(x_c24_val), np.int64)])
-        net = M.fit(xt, yt, np.ones(len(xt), np.float32), xvc, yvc, seed, augment=aug)
-        t1_val = choose_threshold(M.predict_proba(net, x[va]), y[va])
-        p_test = M.predict_proba(net, x[test])
-        sc = {p: score_signal(net, SOURCE.signal(p)) for p in test_p}
+        net = FallModel.train(xt, yt, xvc, yvc, channels="acc", seed=seed, augment=aug)
+        t1_val = choose_threshold(net.scores(x[va]), y[va])
+        p_test = net.scores(x[test])
+        sc = {p: net.score_signal(SOURCE.signal(p)) for p in test_p}
         del net, xt, xc
         torch.cuda.empty_cache()
         # ---- stage 2 training data

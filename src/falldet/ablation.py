@@ -13,10 +13,10 @@ import numpy as np
 import pandas as pd
 import torch
 
-from . import model as M
 from .augment import TRANSFORMS, Augment
 from .baseline import choose_threshold, metrics, split_validation
 from .cli import PROCESSED, REPORTS
+from .model import FallModel
 
 COLS = ["sensitivity", "false_alarms_per_h", "auroc", "ap", "fa_h_at_95sens_oracle"]
 LOWER = {"false_alarms_per_h", "fa_h_at_95sens_oracle"}
@@ -36,7 +36,6 @@ def run(seeds: int = 5, channels: str = "acc") -> None:
     X = np.load(PROCESSED / "X.npy")
     meta = pd.read_csv(PROCESSED / "meta.csv")
     y = meta.label.to_numpy().astype(np.int64)
-    x = M.make_inputs(X, channels)
     datasets = sorted(meta.dataset.unique())
     out = REPORTS / f"ablation_{channels}"
     out.mkdir(parents=True, exist_ok=True)
@@ -47,9 +46,9 @@ def run(seeds: int = 5, channels: str = "acc") -> None:
                 test = np.where(meta.dataset == d)[0]
                 train = np.where(meta.dataset != d)[0]
                 tr, va = split_validation(meta, train, seed)
-                net = M.fit(x[tr], y[tr], np.ones(len(tr), np.float32), x[va], y[va], seed, augment=aug)
-                thr = choose_threshold(M.predict_proba(net, x[va]), y[va])
-                p = M.predict_proba(net, x[test])
+                net = FallModel.train(X[tr], y[tr], X[va], y[va], channels=channels, seed=seed, augment=aug)
+                thr = choose_threshold(net.scores(X[va]), y[va])
+                p = net.scores(X[test])
                 rows.append({"config": name, "seed": seed, "fold": d, **metrics(y[test], (p >= thr).astype(int), p)})
                 del net
                 torch.cuda.empty_cache()
