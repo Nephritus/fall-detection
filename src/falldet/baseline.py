@@ -163,7 +163,7 @@ def report(augment: bool = False, seeds: int | None = None) -> None:
                     t["fired"], t["model"] = a[k].astype(int), m
                     act_rows.append(t.assign(seed=seed))
     acts = pd.concat(act_rows)
-    acts.to_csv(out / "per_activity_windows.csv.gz", index=False)
+    acts.to_csv(out / "per_activity_windows.csv.gz", index=False, compression={"method": "gzip", "mtime": 0})
     timed = df.groupby(["condition", "seed", "fold"]).seconds.first() if "seconds" in df else pd.Series(dtype=float)
     seconds = timed.sum() if len(timed) and timed.notna().all() else None
     prep = json.loads((PROCESSED / "prepare_log.json").read_text())

@@ -166,7 +166,7 @@ def run(seeds: int = 5, negatives: bool = False) -> None:
     ms.to_csv(ms_path, index=False)
     tr = pd.read_csv(tr_path) if tr_path.exists() else tradeoff(pids, seeds, REFRACTORY_S, root)
     tr.to_csv(tr_path, index=False)
-    tab.to_csv(out / "alarms_by_label.csv.gz", index=False)
+    tab.to_csv(out / "alarms_by_label.csv.gz", index=False, compression={"method": "gzip", "mtime": 0})
     write_report(prep, tab, thr, out, seeds, time.time() - t0, ms, tr, negatives, root)
     print(f"report: {out / 'report.md'}")
 

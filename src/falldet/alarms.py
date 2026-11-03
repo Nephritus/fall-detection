@@ -125,7 +125,7 @@ class FalseAlarms:
             opened = lab[fire][_merge(t[fire], self.refractory)]
             ev = dict(zip(*np.unique(opened, return_counts=True))) if len(opened) else {}
             det = dict(zip(*np.unique(lab[fire], return_counts=True))) if fire.any() else {}
-            for name in set(lh) | set(ev):
+            for name in sorted(set(lh) | set(ev)):
                 rows.append({"wearer": k, "label": name, "hours": lh.get(name, 0.0),
                              "events": int(ev.get(name, 0)), "detections": int(det.get(name, 0))})
         return pd.DataFrame(rows, columns=["wearer", "label", "hours", "events", "detections"])
