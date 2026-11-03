@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fall detection on Apple, Samsung, Huawei and Garmin wearables: summary</title>
+<style>
+  :root {
+    --bg:#fff; --fg:#1b1f24; --muted:#586069; --border:#d8dee4; --surface:#f6f8fa;
+    --accent:#0969da; --ok:#1a7f37; --warn:#9a6700; --bad:#cf222e;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#0d1117; --fg:#e6edf3; --muted:#8b949e; --border:#30363d; --surface:#161b22;
+            --accent:#58a6ff; --ok:#3fb950; --warn:#d29922; --bad:#f85149; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+         font:16px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; }
+  main { max-width:1000px; margin:0 auto; padding:2rem 1.25rem 4rem; }
+  h1 { font-size:1.75rem; line-height:1.25; margin:0 0 .25rem; }
+  h2 { font-size:1.35rem; margin:2.5rem 0 .75rem; padding-bottom:.3rem; border-bottom:1px solid var(--border); }
+  h3 { font-size:1.05rem; margin:1.5rem 0 .5rem; }
+  p, li { max-width:75ch; }
+  a { color:var(--accent); }
+  .meta { color:var(--muted); font-size:.9rem; margin-bottom:1.5rem; }
+  .tldr { background:var(--surface); border:1px solid var(--border); border-left:4px solid var(--accent);
+          border-radius:6px; padding:1rem 1.25rem; }
+  .tldr ul { margin:.25rem 0 0; padding-left:1.2rem; }
+  .tablewrap { overflow-x:auto; border:1px solid var(--border); border-radius:6px; }
+  table { border-collapse:collapse; width:100%; font-size:.9rem; }
+  th, td { text-align:left; vertical-align:top; padding:.55rem .7rem; border-bottom:1px solid var(--border); }
+  th { background:var(--surface); white-space:nowrap; }
+  tr:last-child td { border-bottom:0; }
+  .tag { display:inline-block; font-size:.78rem; font-weight:600; padding:0 .45rem; border-radius:999px;
+         border:1px solid currentColor; white-space:nowrap; }
+  .yes { color:var(--ok); } .no { color:var(--bad); } .maybe { color:var(--warn); }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(230px,1fr)); gap:1rem; }
+  .card { border:1px solid var(--border); border-radius:6px; padding:.9rem 1rem; background:var(--surface); }
+  .card h3 { margin:0 0 .4rem; }
+  .card ul { margin:.3rem 0 0; padding-left:1.1rem; font-size:.92rem; }
+  code { background:var(--surface); border:1px solid var(--border); border-radius:4px; padding:0 .3em; font-size:.88em; }
+  .callout { border:1px solid var(--warn); border-left-width:4px; border-radius:6px; padding:.8rem 1rem; background:var(--surface); }
+  .pipeline { display:flex; flex-wrap:wrap; gap:.5rem; align-items:stretch; margin:.5rem 0 1rem; }
+  .step { flex:1 1 180px; border:1px solid var(--border); border-radius:6px; padding:.6rem .8rem; background:var(--surface); font-size:.92rem; }
+  .step b { display:block; color:var(--accent); font-size:.8rem; text-transform:uppercase; letter-spacing:.04em; }
+  ol.plan li { margin:.25rem 0; }
+  footer { margin-top:3rem; color:var(--muted); font-size:.85rem; border-top:1px solid var(--border); padding-top:1rem; }
+</style>
+</head>
+<body>
+<main>
+
+<h1>Fall detection on Apple, Samsung, Huawei and Garmin wearables</h1>
+<div class="meta">
+  Summary of <code>fall-detection-sdks-and-model-training.md</code> &middot; research compiled 2026-11-02 &middot;
+  primary sources only (vendor docs, papers, official dataset pages). Items the research could not confirm are marked
+  <b>[UNVERIFIED]</b>; reasoning not stated by a source is marked <b>[INFERENCE]</b>. Full citations are in the report.
+</div>
+
+<div class="tldr">
+  <strong>Bottom line</strong>
+  <ul>
+    <li><b>Apple</b> and <b>Samsung</b> let a third-party app receive the watch's own fall event. <b>Huawei</b> and <b>Garmin</b> do not; there you need your own model on raw motion data.</li>
+    <li>Raw accelerometer/gyroscope access exists on all four, with very different background limits.</li>
+    <li>A wrist model is feasible, but no public wrist dataset has <i>real</i> falls, and lab-trained detectors drop sharply on real falls.</li>
+    <li>Synthetic data helps on some tasks but showed <b>no gain</b> in two wrist/watch studies. Use it to pre-train and widen negatives, and validate only on real, per-device data.</li>
+    <li>Plan on collecting a small own dataset on every target watch.</li>
+  </ul>
+</div>
+
+<h2>1. Can you get fall information from each SDK?</h2>
+<div class="tablewrap">
+<table>
+  <thead><tr>
+    <th>Vendor</th><th>Native fall event for 3rd-party apps</th><th>Raw motion data</th><th>Main hurdle</th>
+  </tr></thead>
+  <tbody>
+    <tr>
+      <td><b>Apple</b><br>watchOS</td>
+      <td><span class="tag yes">Yes</span> <code>CMFallDetectionManager</code> &rarr; <code>CMFallDetectionEvent</code>: timestamp + user resolution only.</td>
+      <td><code>CMMotionManager</code> up to 100&nbsp;Hz. <code>CMBatchedSensorManager</code> 800&nbsp;Hz accel / 200&nbsp;Hz device-motion (needs a workout session; Series 8/Ultra). <code>CMSensorRecorder</code> 50&nbsp;Hz accel only, background.</td>
+      <td>Apple-granted entitlement <code>com.apple.developer.health.fall-detection</code> (request form; criteria unpublished). $99/yr.</td>
+    </tr>
+    <tr>
+      <td><b>Samsung</b><br>Galaxy Watch, Wear OS</td>
+      <td><span class="tag yes">Yes</span> via Google Health Services: <code>HealthEvent.Type.FALL_DETECTED</code> in a <code>PassiveListenerService</code>. Which models emit it is undocumented; check <code>getSupportedHealthEventTypes()</code>.</td>
+      <td>Android <code>SensorManager</code> accel/gyro. Health Sensor SDK: <code>ACCELEROMETER_CONTINUOUS</code> at 25&nbsp;Hz, no gyroscope tracker.</td>
+      <td>Sensor SDK needs a partner request (package name + SHA-256) to distribute. Health Services path: no approval documented.</td>
+    </tr>
+    <tr>
+      <td><b>Huawei</b><br>HarmonyOS watches</td>
+      <td><span class="tag no">No</span> none found in Wear Engine, Health Service Kit or Sensor Service Kit <b>[UNVERIFIED negative: docs not exhaustively crawled]</b>.</td>
+      <td><code>@ohos.sensor</code> accelerometer + gyroscope, system-granted permissions, sampling period &ge;5&nbsp;ms (&le;200&nbsp;Hz, device-dependent).</td>
+      <td>Sensors need no approval. Wear Engine: individuals limited to basic scopes. Health Service Kit: ~10-day review, 100-user test cap.</td>
+    </tr>
+    <tr>
+      <td><b>Garmin</b><br>Connect IQ, Health SDK</td>
+      <td><span class="tag no">No</span> Garmin: Incident/Fall Detection "do not function with third-party Connect IQ apps". Fall Detection exists only on Venu&nbsp;4.</td>
+      <td><code>Sensor.registerSensorDataListener</code> accel/gyro: up to 100&nbsp;Hz per SDK 6.3.0 notes, 25&nbsp;Hz reported on fēnix&nbsp;7&nbsp;Pro (forum, user report). Use <code>getMaxSampleRate()</code>.</td>
+      <td>Connect IQ: none. Garmin Health SDK: enterprise licence (fee or minimum device order).</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+<h3>Background execution and on-device ML</h3>
+<div class="tablewrap">
+<table>
+  <thead><tr><th>Vendor</th><th>Background capability</th><th>On-device ML option</th><th>Key limitation</th></tr></thead>
+  <tbody>
+    <tr><td><b>Apple</b></td>
+        <td>Strong for the fall <i>event</i> (entitlement gives background runtime). A custom always-on model has no documented session type; only workout sessions, or analysing a <code>CMSensorRecorder</code> buffer later.</td>
+        <td>Core ML (<code>MLModel</code> since watchOS 4); convert with <code>coremltools</code>.</td>
+        <td>Event carries no sensor window, score or tuning.</td></tr>
+    <tr><td><b>Samsung</b></td>
+        <td>Passive listener runs in background. Raw sensing needs a <code>health</code> foreground service + wake lock + <code>BODY_SENSORS_BACKGROUND</code>.</td>
+        <td>LiteRT (TFLite) or ONNX Runtime, CPU. No Wear-OS-specific ML doc found.</td>
+        <td>Per-model fall-event support undocumented; screen-off sensing needs workarounds.</td></tr>
+    <tr><td><b>Huawei</b></td>
+        <td>No sensor/health continuous-task type documented. Wear Engine is messaging only. Screen-off sensing is undocumented.</td>
+        <td>MindSpore Lite <code>.ms</code> (ONNX/TFLite/PyTorch converter). <b>CPU-only on wearables.</b></td>
+        <td>HarmonyOS 5.1+ watches only; health cloud data is aggregate, not raw.</td></tr>
+    <tr><td><b>Garmin</b></td>
+        <td>Background service &le;30&nbsp;s, temporal event &ge;5&nbsp;min, 64&nbsp;KB background memory on fēnix&nbsp;7. Sensor API not for watch faces or data fields.</td>
+        <td>No ML runtime documented. Compiled Monkey C thresholds/trees, or infer on the phone.</td>
+        <td>Smallest runtime; native fall feature closed.</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h2>2. Training a wrist fall-detection model</h2>
+
+<h3>Why the wrist is hard</h3>
+<ul>
+  <li>It is the most active limb, so clapping, table slams and sports resemble falls. Apple and Huawei both warn their detectors may misread high-impact activity as a fall.</li>
+  <li>Lab comparisons rank the wrist worst: best wrist sensitivity 97.37% vs 99.96% at the waist (Özdemir 2016).</li>
+  <li>Real falls differ from simulated ones, and lab detectors degrade on them. Thirteen published algorithms scored <b>57% sensitivity</b> with <b>3&ndash;85 false alarms/day</b> on real falls (Bagalà 2012).</li>
+  <li>Pooled wrist datasets reach recall 90.6% / specificity 96.9%, but <b>cross-dataset F1 peaks near 70%</b> (Fula &amp; Moreno 2024).</li>
+  <li>Record-wise k-fold inflates accuracy by about 10% (up to 16%). Always split <b>by subject</b>.</li>
+</ul>
+
+<h3>Datasets with a wrist sensor</h3>
+<div class="tablewrap">
+<table>
+  <thead><tr><th>Dataset</th><th>Wrist sensor / rate</th><th>Subjects</th><th>Real falls</th><th>Licence (as stated)</th></tr></thead>
+  <tbody>
+    <tr><td>UP-Fall</td><td>Left wrist, 100&nbsp;Hz</td><td>17 young</td><td>No</td><td>Not stated</td></tr>
+    <tr><td>UMAFall</td><td>Right wrist, 20/100&nbsp;Hz</td><td>17&ndash;19</td><td>No</td><td><b>CC BY 4.0</b></td></tr>
+    <tr><td>FallAllD</td><td>Wrist, 238&nbsp;Hz, plus barometer</td><td>15</td><td>No</td><td>Not stated; free IEEE account</td></tr>
+    <tr><td>WEDA-FALL</td><td>Fitbit Sense, 50&nbsp;Hz</td><td>25 (11 elderly, ADLs only)</td><td>No</td><td>Not stated</td></tr>
+    <tr><td>SmartFall</td><td>MS Band 2, 31.25&nbsp;Hz</td><td>7</td><td>No</td><td>Not stated</td></tr>
+    <tr><td>Erciyes (UCI)</td><td>Right wrist</td><td>~17&ndash;20</td><td>No</td><td><b>CC BY 4.0</b></td></tr>
+    <tr><td>FARSEEING</td><td><b>No wrist</b> (lower back/thigh)</td><td>94 fallers</td><td><b>Yes, 208</b></td><td>No sharing with primarily commercial projects</td></tr>
+  </tbody>
+</table>
+</div>
+<p>Only UMAFall and Erciyes state an open licence. Get written permission before commercial training on the others <b>[INFERENCE]</b>. SisFall, MobiAct and KFall have no wrist sensor.</p>
+
+<h3>Recommended model</h3>
+<div class="pipeline">
+  <div class="step"><b>1 &middot; Trigger</b>Always-on impact / free-fall / rotation-burst detector at 25&ndash;50&nbsp;Hz.</div>
+  <div class="step"><b>2 &middot; Classifier</b>Dual-stream gated 1D-CNN on a 4&ndash;6&nbsp;s window, ~20&ndash;60k params, int8.</div>
+  <div class="step"><b>3 &middot; Verifier</b>10&ndash;60&nbsp;s post-impact inactivity / orientation check.</div>
+  <div class="step"><b>4 &middot; User countdown</b>Cancelable countdown (Apple uses 30&nbsp;s), then contacts.</div>
+</div>
+<ul>
+  <li>The gated 1D-CNN comes from a May 2026 arXiv preprint (F1 90&ndash;93% on five wrist datasets; 12-participant Pixel Watch 3 test). Treat as a strong candidate, not settled.</li>
+  <li>Small Transformers are not recommended: more false positives at deployment.</li>
+  <li>Garmin: stage 1 plus a compiled tree/logistic head only.</li>
+  <li>Window lengths, parameter counts and size figures are <b>[INFERENCE]</b>; tune empirically.</li>
+</ul>
+
+<h2>3. Synthetic data generation</h2>
+<p>Published evidence is real but task-dependent, and weakest for short wrist motions on a watch.</p>
+
+<div class="grid">
+  <div class="card"><h3>Physics / video / text &rarr; virtual IMU</h3>
+    <ul>
+      <li>Generate motion, attach a virtual wrist IMU, add bias, noise, clipping and quantisation.</li>
+      <li>Tools: IMUSim (GPL-3.0), OpenSim and MuJoCo (Apache-2.0), Isaac Lab (BSD-3).</li>
+      <li>Fall-specific recipe (Tang et al.): multi-camera video &rarr; OpenPose &rarr; OpenSim IK &rarr; simulated IMU &rarr; LSTM. Shank ~90%, other placements 60&ndash;70%; gyro matching weaker.</li>
+      <li>IMUTube, IMUGPT (video / LLM-text driven) help most with little real data.</li>
+    </ul></div>
+  <div class="card"><h3>Generative models</h3>
+    <ul>
+      <li>TimeGAN, Diffusion-TS, IMUDiffusion.</li>
+      <li>Low distribution divergence did <b>not</b> mean better classification (Alamgeer 2025).</li>
+      <li>Trained on a few dozen simulated falls, they mostly reproduce the simulation's biases <b>[INFERENCE]</b>.</li>
+    </ul></div>
+  <div class="card"><h3>Augmentation</h3>
+    <ul>
+      <li>Jitter, scaling, rotation, time/magnitude warp (Um et al. 2017).</li>
+      <li>Rotate accel and gyro with the <b>same</b> matrix; keep rotations wrist-plausible (&plusmn;30&deg; about the forearm).</li>
+      <li>Keep time-warp within &plusmn;15%; clip to sensor range.</li>
+      <li>Avoid SMOTE on fall windows; it blends impact timing and posture <b>[INFERENCE]</b>.</li>
+    </ul></div>
+  <div class="card"><h3>Sim-to-real gap</h3>
+    <ul>
+      <li>Domain randomisation (body size, strap slip, surface stiffness, noise).</li>
+      <li>Calibrate with a little real data; pre-train synthetic, fine-tune real.</li>
+      <li>Per-device fine-tune with feedback: F1 88&rarr;92% with fewer false positives (Sensors 2025).</li>
+    </ul></div>
+</div>
+
+<h3>What the studies actually found</h3>
+<div class="tablewrap">
+<table>
+  <thead><tr><th>Study</th><th>Result</th></tr></thead>
+  <tbody>
+    <tr><td>Alamgeer et al. 2025 (text-to-motion + LLM + Diffusion-TS)</td><td>SmartFallMM <b>watch</b>: F1 0.740 &rarr; 0.710 (&minus;4%); all synthetic sources worse. Gains on KFall (+15.9%), UMAFall (+56.8%), SisFall (+7.1%).</td></tr>
+    <tr><td>Leng, Iyer, Plötz 2025 (IMUTube vs IMUGPT)</td><td>Big gains at 10% real data (PAMAP2 28.7&rarr;91.1% macro-F1). <b>Apple Watch wrist dataset: no significant improvement.</b></td></tr>
+    <tr><td>IMUTube (Kwon 2020), RealWorld DeepConvLSTM</td><td>F1 real 0.731, virtual-only 0.547, mixed 0.779. Virtual alone is worse; mixing helps.</td></tr>
+  </tbody>
+</table>
+</div>
+
+<div class="callout" style="margin-top:1rem">
+  <b>Licence trap.</b> AMASS and SMPL are non-commercial and the AMASS licence also prohibits training models for commercial use.
+  That covers pipelines built on them (text-to-motion models trained on HumanML3D/AMASS, PHC). IMUSim is GPL-3.0; IMUTube code needs a Georgia Tech licence for commercial use.
+  The license-safe route is own mocap, OpenSim/MuJoCo, or own staged video. No primary source was found for "UbiPose" or "Pose2IMU".
+</div>
+
+<h3>License-safe synthetic pipeline</h3>
+<ol>
+  <li>Motion from own mocap/IMU rig, OpenSim/MuJoCo falls with randomised initial conditions, or own staged video &rarr; pose &rarr; OpenSim IK.</li>
+  <li>Virtual wrist IMU with mount offset, strap slip, bias/scale/misalignment, noise, clipping, quantisation, then anti-aliased decimation to 25/50&nbsp;Hz.</li>
+  <li>Hard negatives: table slams, clapping, door closing, sitting hard, stumble-recover, sports swings, stairs, arm flailing.</li>
+  <li>Start 1:1 real:synthetic per class and sweep the fraction.</li>
+  <li>Pre-train on synthetic, fine-tune on real; run a synthetic-only ablation; subject-wise CV plus cross-dataset tests.</li>
+  <li>Record data lineage and licences for every asset.</li>
+</ol>
+
+<h2>4. Cross-device portability and deployment</h2>
+<p>Vendor conventions differ: Apple reports g; Android and HarmonyOS report m/s&sup2; including gravity; Garmin reports milli-g integers. Axis frames and rates differ too (Samsung Sensor SDK 25&nbsp;Hz, Garmin up to 100&nbsp;Hz where supported, Apple 50/100/800&nbsp;Hz, Huawei &le;200&nbsp;Hz).</p>
+<ul>
+  <li><b>Canonical format (a convention to adopt, not a vendor standard):</b> float32, accel in g with gravity, gyro in rad/s, right-handed wrist frame (flat face-up watch reads +1&nbsp;g on z), 50&nbsp;Hz and 25&nbsp;Hz grids from timestamps, left-wrist canonical with mirroring for right wrist, per-record metadata.</li>
+  <li>Per-vendor adapter with a flat-watch calibration check (face up, face down, each edge).</li>
+  <li>Train a 25&nbsp;Hz-native variant rather than naively downsampling 238&nbsp;Hz data without anti-aliasing.</li>
+</ul>
+
+<div class="tablewrap">
+<table>
+  <thead><tr><th>Platform</th><th>Export path</th><th>Constraint to plan for</th></tr></thead>
+  <tbody>
+    <tr><td><b>Apple</b></td><td>PyTorch &rarr; <code>torch.jit.trace</code>/<code>torch.export</code> &rarr; <code>coremltools</code> &rarr; <code>.mlpackage</code></td><td>No documented always-on background session for custom models.</td></tr>
+    <tr><td><b>Samsung</b></td><td>PyTorch/TF &rarr; LiteRT <code>.tflite</code> with int8/dynamic-range PTQ (or ONNX Runtime)</td><td>Foreground service + wake lock for screen-off sensing; battery over 24&nbsp;h unpublished.</td></tr>
+    <tr><td><b>Huawei</b></td><td>PyTorch &rarr; ONNX/TFLite &rarr; <code>converter_lite</code> &rarr; <code>.ms</code></td><td>CPU-only; check ONNX operator support; emulator lacks wearable Health Service Kit.</td></tr>
+    <tr><td><b>Garmin</b></td><td>scikit-learn trees/logistic &rarr; generated Monkey C, fixed-point ints; or infer on phone</td><td>768&nbsp;KB app / 64&nbsp;KB background (fēnix&nbsp;7); no tensor runtime.</td></tr>
+  </tbody>
+</table>
+</div>
+<p>No vendor publishes inference-latency or energy budgets for these watches <b>[UNVERIFIED]</b>. Measure model size, p95 latency, trigger rate per hour and battery %/24&nbsp;h on each device.</p>
+
+<h2>5. Recommended plan</h2>
+<ol class="plan">
+  <li>Fix scope and claims: a wellness fall-alert assistant, not a medical device, pending legal advice. Set a false-alarm budget (e.g. &le;1/user/day) and a minimum scripted-fall sensitivity.</li>
+  <li>Per-platform feasibility spike: request the Apple entitlement and apply for Samsung partner status early; log raw IMU on each watch; test Huawei screen-off behaviour; call <code>getMaxSampleRate()</code> on Garmin targets.</li>
+  <li>Build the canonical data layer: adapters, unit/axis/rate normalisation, calibration tests.</li>
+  <li>Pool real wrist datasets (check licences), resample with anti-aliasing, split by subject plus leave-one-dataset-out.</li>
+  <li>Train baselines: threshold trigger, RF/XGBoost on features, gated 1D-CNN. Report sensitivity, specificity, PR and false alarms per simulated day.</li>
+  <li>Add the license-safe synthetic data; keep it only if real-validation improves.</li>
+  <li>Collect your own per-device dataset: scripted mat falls with a spotter (&ge;15 subjects, older adults if ethics allow), hard negatives, multi-day free-living wear. On Apple/Samsung, log native fall events beside your model's output as weak labels <b>[INFERENCE]</b>.</li>
+  <li>Per-device fine-tune and quantise, export, verify numerical parity.</li>
+  <li>On-device validation: latency, battery, trigger rate, &ge;2 weeks in shadow mode.</li>
+  <li>Alert flow: cancel countdown, contact messaging via the phone companion, consent screens, offline fallback.</li>
+  <li>Field pilot with an "I fell / false alarm" button; retrain on confirmed false positives; regulatory review before wider release.</li>
+  <li>Maintain: OS updates change sensor and background behaviour; re-run calibration per release.</li>
+</ol>
+
+<h2>6. Safety and regulatory</h2>
+<ul>
+  <li>Every vendor disclaims: Apple "cannot detect all falls"; Huawei is "not dedicated emergency assistance"; Samsung SDK data is "for fitness and wellness information only"; Garmin makes the developer responsible for FDA/MHRA compliance.</li>
+  <li><b>[INFERENCE]</b> FDA's General Wellness guidance (reissued 2026-01-06) probably does not cover an alert that summons emergency help; EU MDR Rule 11 applicability depends on intended purpose. The sources read do not settle either. Get counsel.</li>
+  <li>Health data is special-category under GDPR. Apple App Review 1.4.1 demands disclosed methodology for accuracy claims.</li>
+  <li>Avoid double escalation with native Apple/Samsung fall features; escalate to emergency contacts first; make false-alarm burden a release criterion.</li>
+</ul>
+
+<h2>7. Open gaps</h2>
+<ul>
+  <li><b>Apple:</b> entitlement approval criteria; whether events fire when system Fall Detection is off; watchOS accelerometer range and gyro limits.</li>
+  <li><b>Samsung:</b> which Galaxy Watch models/firmware emit <code>FALL_DETECTED</code>; which metrics populate; partner approval timeline and fees.</li>
+  <li><b>Huawei:</b> fall event in non-public partner APIs; real sensor rates; background sensing rules. Public docs only; some pages not retrievable.</li>
+  <li><b>Garmin:</b> which devices exceed 25&nbsp;Hz; whether the sensor listener runs in a background service; gyro units and axes.</li>
+  <li><b>Data:</b> licences for SisFall, UP-Fall, FallAllD, WEDA-FALL, SmartFall, KFall unconfirmed; no public real-fall wrist dataset; no elderly wrist fall data; no wrist-specific sim-to-real numbers.</li>
+  <li><b>All vendors:</b> no published latency or energy figures for custom ML on these watches.</li>
+</ul>
+
+<footer>
+  Generated from the full report at <code>docs/research/fall-detection-sdks-and-model-training.md</code>, which contains every inline source link and the access-dated source list (section 7). This summary condenses it and does not add new research.
+</footer>
+
+</main>
+</body>
+</html>

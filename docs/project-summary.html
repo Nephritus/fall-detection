@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Wrist-IMU fall detection baseline: project summary</title>
+<style>
+  :root {
+    --bg:#fff; --fg:#1b1f24; --muted:#586069; --border:#d8dee4; --surface:#f6f8fa;
+    --accent:#0969da; --ok:#1a7f37; --warn:#9a6700; --bad:#cf222e;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#0d1117; --fg:#e6edf3; --muted:#8b949e; --border:#30363d; --surface:#161b22;
+            --accent:#58a6ff; --ok:#3fb950; --warn:#d29922; --bad:#f85149; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+         font:16px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; }
+  main { max-width:1000px; margin:0 auto; padding:2rem 1.25rem 4rem; }
+  h1 { font-size:1.75rem; line-height:1.25; margin:0 0 .25rem; }
+  h2 { font-size:1.35rem; margin:2.5rem 0 .75rem; padding-bottom:.3rem; border-bottom:1px solid var(--border); }
+  h3 { font-size:1.05rem; margin:1.5rem 0 .5rem; }
+  p, li { max-width:78ch; }
+  a { color:var(--accent); }
+  .meta { color:var(--muted); font-size:.9rem; margin-bottom:1.5rem; }
+  .tldr { background:var(--surface); border:1px solid var(--border); border-left:4px solid var(--accent);
+          border-radius:6px; padding:1rem 1.25rem; }
+  .tldr ul { margin:.25rem 0 0; padding-left:1.2rem; }
+  .tablewrap { overflow-x:auto; border:1px solid var(--border); border-radius:6px; margin:.5rem 0 1rem; }
+  table { border-collapse:collapse; width:100%; font-size:.9rem; }
+  th, td { text-align:left; vertical-align:top; padding:.5rem .7rem; border-bottom:1px solid var(--border); }
+  th { background:var(--surface); white-space:nowrap; }
+  tr:last-child td { border-bottom:0; }
+  td.n, th.n { text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap; }
+  .good { color:var(--ok); font-weight:600; } .bad { color:var(--bad); font-weight:600; } .mid { color:var(--warn); font-weight:600; }
+  .tag { display:inline-block; font-size:.78rem; font-weight:600; padding:0 .45rem; border-radius:999px;
+         border:1px solid currentColor; white-space:nowrap; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(230px,1fr)); gap:1rem; }
+  .card { border:1px solid var(--border); border-radius:6px; padding:.9rem 1rem; background:var(--surface); }
+  .card h3 { margin:0 0 .4rem; }
+  .card ul { margin:.3rem 0 0; padding-left:1.1rem; font-size:.92rem; }
+  .big { font-size:1.7rem; font-weight:700; line-height:1.1; }
+  .big small { font-size:.8rem; font-weight:400; color:var(--muted); }
+  code { background:var(--surface); border:1px solid var(--border); border-radius:4px; padding:0 .3em; font-size:.88em; }
+  pre { background:var(--surface); border:1px solid var(--border); border-radius:6px; padding:.8rem 1rem; overflow-x:auto; font-size:.85rem; }
+  pre code { border:0; padding:0; background:none; }
+  .callout { border:1px solid var(--warn); border-left-width:4px; border-radius:6px; padding:.8rem 1rem; background:var(--surface); }
+  .steps { display:flex; flex-wrap:wrap; gap:.5rem; margin:.5rem 0 1rem; }
+  .step { flex:1 1 150px; border:1px solid var(--border); border-radius:6px; padding:.55rem .75rem; background:var(--surface); font-size:.88rem; }
+  .step b { display:block; color:var(--accent); font-size:.75rem; text-transform:uppercase; letter-spacing:.04em; }
+  .bars { margin:.5rem 0 1rem; }
+  .bar { display:grid; grid-template-columns:minmax(150px,34%) 1fr 4.5rem; align-items:center; gap:.6rem; margin:.28rem 0; font-size:.88rem; }
+  .bar .track { background:var(--surface); border:1px solid var(--border); border-radius:4px; height:1.15rem; }
+  .bar .fill { height:100%; background:var(--accent); border-radius:3px; }
+  .bar .fill.alt { background:var(--warn); } .bar .fill.win { background:var(--ok); } .bar .fill.lose { background:var(--bad); }
+  .bar .v { text-align:right; font-variant-numeric:tabular-nums; }
+  .note { color:var(--muted); font-size:.85rem; }
+  footer { margin-top:3rem; color:var(--muted); font-size:.85rem; border-top:1px solid var(--border); padding-top:1rem; }
+</style>
+</head>
+<body>
+<main>
+
+<h1>Wrist-IMU fall detection baseline: what we built and what we found</h1>
+<div class="meta">
+  Project summary &middot; repository <code>fall-detection</code> &middot; all numbers come from the reports in <code>reports/</code>
+  (named per section). Falls in every dataset are <b>simulated</b>, so every sensitivity here is optimistic.
+  Nothing is committed or pushed yet.
+</div>
+
+<div class="tldr">
+  <b>Where it stands</b>
+  <ul>
+    <li><b>Ranking is good, deployment is not.</b> A small 1D-CNN on the accelerometer separates falls from everyday activity well on
+        <em>unseen datasets</em> (AUROC 0.99, AUPRC 0.94 after augmentation), but real everyday wear sets off far too many alarms.</li>
+    <li><b>Biggest wins, in order:</b> more source datasets, augmentation (mirror, rotation, time stretch), and real everyday movement as extra
+        <em>negative</em> training data (Capture-24). The lab false-alarm metric fell from 114 to 51 FA/h with augmentation; free-living alarms
+        per day fell by about half with Capture-24 negatives.</li>
+    <li><b>Measured free-living false alarms</b> (Capture-24, held-out people): <b>36 per day</b> at the current threshold,
+        <b>114 per day</b> at the threshold that catches 95% of simulated falls. A usable product needs a few per week
+        [my assumption, not checked against vendor specs].</li>
+    <li><b>Latest:</b> more negatives per person (3&times; and 10&times;) did <em>not</em> help beyond the 1,500-window setting. A second-stage confirmation
+        (context 1 s before to 4 s after the impact) <b>halves</b> alarms again, <b>35 &rarr; 17 per day</b>, for about 5 points of per-recording fall sensitivity (0.89 &rarr; 0.85).
+        Still more than an order of magnitude from the target, and its stillness cue may be an artefact of how falls were recorded.</li>
+    <li><b>Did not help:</b> synthetic mocap data, hard-negative mining on lab data, gyroscope channels, per-device fine-tuning with fewer than ~4 volunteers, more Capture-24 windows per person.</li>
+  </ul>
+</div>
+
+<h2>1. Goal and how the work went</h2>
+<p>Goal: a baseline wrist-IMU fall detector for consumer smartwatches (Apple, Samsung, Huawei, Garmin), trained only on public data, with honest evaluation.
+It started with a research report on vendor SDK access and model training, then a repository, a grilling session that fixed the design, and a series of experiments.</p>
+<div class="steps">
+  <div class="step"><b>1 Research</b>Vendor SDK access, datasets, synthetic data, deployment (<code>docs/research/</code>)</div>
+  <div class="step"><b>2 Design</b>Canonical format, labels, evaluation (<code>GLOSSARY.md</code>, ADRs)</div>
+  <div class="step"><b>3 Baseline</b>CNN vs threshold rule, 3 &rarr; 4 datasets</div>
+  <div class="step"><b>4 Improve</b>Augmentation, ablation, threshold rules, fine-tuning, synthetic</div>
+  <div class="step"><b>5 Make FA/h real</b>Event counting, Capture-24 free-living, real negatives</div>
+  <div class="step"><b>6 Cut alarms further</b>Negatives dose-response, second-stage confirmation</div>
+</div>
+
+<h2>2. Data</h2>
+<div class="tablewrap"><table>
+<thead><tr><th>Dataset</th><th>Role</th><th>Size used</th><th>Caveats</th></tr></thead>
+<tbody>
+<tr><td>WEDA-FALL</td><td>falls + ADL</td><td class="n">615 fall / 3,122 ADL windows</td><td>Fitbit Sense, left wrist; annotated fall intervals</td></tr>
+<tr><td>Erciyes (UCI 455)</td><td>falls + ADL</td><td class="n">3,203 / 12,667</td><td>Right wrist, no fall annotations (impact = magnitude peak), forearm roll weakly constrained</td></tr>
+<tr><td>UP-Fall</td><td>falls + ADL</td><td class="n">209 / 4,631</td><td>Mounting differs per person; 5 of 17 subjects excluded; ~20 Hz irregular</td></tr>
+<tr><td>UMAFall</td><td>falls + ADL</td><td class="n">367 / 3,198</td><td>Wrist side not stated in files (assumed right); gyro saturates at ±256 deg/s; subject 16 excluded</td></tr>
+<tr><td>Capture-24</td><td>free-living, no falls</td><td class="n">140 people, ~3,600 h</td><td>Research accelerometer (AX3), dominant wrist (assumed right), CC BY 4.0; used for false-alarm measurement and as negatives</td></tr>
+<tr><td>LAFAN1 mocap</td><td>synthetic falls/ADL</td><td class="n">693 / 7,320 windows</td><td>5 actors, ~99 detected falls, CC BY-NC-ND; experiment only</td></tr>
+<tr><td>FallAllD, SisFall</td><td>not used</td><td class="n">&ndash;</td><td>FallAllD needs an IEEE DataPort subscription; SisFall is waist-worn, so not comparable to wrist data</td></tr>
+</tbody></table></div>
+<p>Everything is converted to one <b>canonical format</b>: 25 Hz, accelerometer in g (clipped at ±4 g), gyroscope in rad/s, one wrist-frame convention (left-wrist; right-wrist data mirrored),
+mounting aligned per person from walking or standing. Windows are 4 s long with 2 s stride; a fall window must contain the impact moment; other windows of a fall recording are excluded.
+In total 28,012 windows (4,394 fall, 23,618 ADL). <b>Impact moment:</b> the magnitude-peak fallback was used for 2,038 of 2,566 fall recordings.</p>
+
+<h2>3. Model and evaluation protocol</h2>
+<ul>
+  <li><b>Model:</b> 1D-CNN, 3 conv blocks (32/64/128, kernel 5, BN, ReLU, max-pool), global average pool, dropout, one logit. AdamW, class-weighted loss, early stopping on subject-wise validation AUPRC.
+      Accelerometer-only (4 input channels) was kept as the default because adding the gyroscope never clearly helped.</li>
+  <li><b>Headline protocol:</b> leave-one-dataset-out (LODO): train on three fall datasets, test on the fourth, repeat for each. Also subject-wise 5-fold CV (pooled, optimistic).</li>
+  <li><b>Metrics:</b> AUROC, AUPRC (average precision), sensitivity and false alarms/h at a threshold chosen for 95% sensitivity on a validation slice,
+      and <em>oracle FA/h at 95% sensitivity</em> (threshold set on the test scores; a ranking diagnostic that does not depend on threshold transfer).</li>
+</ul>
+
+<h2>4. Results, experiment by experiment</h2>
+
+<h3>4.1 Baseline: CNN vs threshold rule (4 datasets, 3 seeds, <code>reports/baseline</code>)</h3>
+<div class="tablewrap"><table>
+<thead><tr><th>LODO, macro</th><th class="n">Sensitivity</th><th class="n">FA/h at threshold</th><th class="n">AUROC</th><th class="n">AUPRC</th><th class="n">Oracle FA/h</th></tr></thead>
+<tbody>
+<tr><td>Threshold rule (free-fall dip + impact peak)</td><td class="n">0.982</td><td class="n">336</td><td class="n">&ndash;</td><td class="n">&ndash;</td><td class="n">&ndash;</td></tr>
+<tr><td>CNN, accel + gyro</td><td class="n">0.831</td><td class="n">53.6</td><td class="n">0.975</td><td class="n">0.844</td><td class="n">192</td></tr>
+<tr><td>CNN, accel only</td><td class="n">0.843</td><td class="n">49.4</td><td class="n">0.981</td><td class="n">0.875</td><td class="n">114</td></tr>
+</tbody></table></div>
+<ul>
+  <li>The threshold rule's tuned dip level ended up at 1.5 g (above resting gravity), so it degenerates to "impact exceeds about 2&ndash;2.5 g": it catches nearly every fall and fires on hopping, jogging and clapping.</li>
+  <li>Hard-negative mining on lab data (retrain with up-weighted false alarms) did nothing. The gyroscope gave no cross-dataset benefit.</li>
+  <li>Adding UMAFall (the 4th dataset) improved the accel-only oracle FA/h on every unseen dataset more than any tuning had.</li>
+</ul>
+
+<h3>4.2 Augmentation (<code>reports/baseline_augmented</code>, <code>ablation_acc|imu</code>)</h3>
+<p>On-the-fly synthetic variants of each training batch: forearm roll ±30° plus tilt, left/right mirror, gain ±10%, time stretch ±10%, shift ±0.2 s, jitter. Validation and test data are never augmented.</p>
+<div class="bars">
+  <div class="bar"><span>Oracle FA/h, accel-only, no augmentation</span><span class="track"><span class="fill lose" style="display:block;width:100%"></span></span><span class="v">114</span></div>
+  <div class="bar"><span>Oracle FA/h, accel-only, augmented</span><span class="track"><span class="fill win" style="display:block;width:45%"></span></span><span class="v">51</span></div>
+  <div class="bar"><span>Oracle FA/h, accel + gyro, no augmentation</span><span class="track"><span class="fill lose" style="display:block;width:100%"></span></span><span class="v">192</span></div>
+  <div class="bar"><span>Oracle FA/h, accel + gyro, augmented</span><span class="track"><span class="fill win" style="display:block;width:38%"></span></span><span class="v">73</span></div>
+</div>
+<p>Accel-only AUROC rose 0.981 &rarr; 0.990 and AUPRC 0.875 &rarr; 0.938, better in 11&ndash;12 of 12 paired runs. Pooled subject-wise CV barely changed (it was near its ceiling): the gain is in cross-dataset transfer.</p>
+<p><b>Which transform matters (ablation, 5 seeds):</b> mirror is the strongest by far (alone it cuts oracle FA/h from 132 to 72, and dropping it from the full set costs the most),
+then rotation and time stretch. Gain and jitter are at the noise floor. Run-to-run noise is large (macro std 10&ndash;30 FA/h), so only differences above about 15 FA/h are meaningful.</p>
+
+<h3>4.3 Threshold transfer (<code>reports/threshold_augmented</code>)</h3>
+<p>The model ranks well, but the threshold picked on a validation slice of the training datasets reached only 0.87 sensitivity on an unseen dataset (target 0.95).
+Compared on lab-clip replay, accel-only augmented:</p>
+<div class="tablewrap"><table>
+<thead><tr><th>Rule</th><th class="n">Sensitivity</th><th class="n">FA/h (replay)</th><th>Needs from new device</th></tr></thead>
+<tbody>
+<tr><td><code>val-slice</code> (original)</td><td class="n bad">0.867</td><td class="n">26.6</td><td>nothing</td></tr>
+<tr><td><code>lodo-pooled</code> (nested leave-one-dataset-out)</td><td class="n good">0.958</td><td class="n">75.5</td><td>nothing</td></tr>
+<tr><td><code>lodo-worst</code></td><td class="n">0.979</td><td class="n">164.8</td><td>nothing</td></tr>
+<tr><td><code>adl-budget-50</code></td><td class="n">0.937</td><td class="n">55.1</td><td>ADL recordings only; unstable across datasets</td></tr>
+<tr><td><code>falls-pool</code></td><td class="n">0.949</td><td class="n">55.0</td><td>labelled falls on the device</td></tr>
+<tr><td><code>oracle</code> (not realisable)</td><td class="n">0.952</td><td class="n">46.4</td><td>&ndash;</td></tr>
+</tbody></table></div>
+<p><code>lodo-pooled</code> is the best rule that needs no target data; it overshoots slightly, which is the cheap direction to be wrong.</p>
+
+<h3>4.4 Per-device fine-tuning (<code>reports/finetune_augmented</code>)</h3>
+<p>One held-out dataset stands in for a new watch; k volunteers adapt the model (plus calibration volunteers). Accel-only, oracle FA/h at 95% sensitivity, k = 4: zero-shot <b>49</b>, full fine-tune <b>28</b>,
+training from scratch on the same volunteers 170. Sensitivity at the chosen threshold went 0.865 &rarr; 0.922 at about the same false alarms. <span class="mid">But</span> fine-tuning beat zero-shot in only 45% (k=1), 35% (k=2) and 55% (k=4) of runs on the oracle metric:
+with fewer than about four volunteers the gain is not reliable. Recalibrating only the threshold costs more false alarms; BatchNorm re-estimation hurt.</p>
+
+<h3>4.5 Synthetic data from motion capture (<code>reports/synthetic_acc|imu</code>, ADR 0002)</h3>
+<p>A numpy virtual wrist IMU on LAFAN1 (finite differences, per-person mounting alignment; falls detected from the skeleton) was added to training, 8 seeds.</p>
+<div class="tablewrap"><table>
+<thead><tr><th>Condition (accel-only)</th><th class="n">Oracle FA/h</th><th class="n">Change vs real-only (±SE)</th></tr></thead>
+<tbody>
+<tr><td>Real only (augmented)</td><td class="n">53.9</td><td class="n">&ndash;</td></tr>
+<tr><td>+ all synthetic</td><td class="n">54.4</td><td class="n">+0.5 ± 5.4</td></tr>
+<tr><td>+ 25% of synthetic</td><td class="n">43.2</td><td class="n">&minus;10.7 ± 5.3 (did not repeat for accel + gyro)</td></tr>
+<tr><td>+ synthetic falls only</td><td class="n">64.0</td><td class="n bad">+10.1 ± 4.5</td></tr>
+<tr><td>Synthetic only</td><td class="n">687</td><td class="n bad">AUROC 0.915 on real data</td></tr>
+</tbody></table></div>
+<p><b>No reliable gain.</b> A classifier could tell synthetic windows from real ones (AUROC 0.96 ADL, 0.99 falls; a quick unsaved check), a larger gap than between real datasets. Without augmentation the synthetic data raised AUPRC, but never beat augmented real-only training.
+Recommendation: keep real data plus augmentation; revisit synthetic data only with a sensor model and more varied motion.</p>
+
+<h3>4.6 Making false alarms a real number</h3>
+<p>The replay metric counts every fired 4 s window of scripted clips, so it neither de-duplicates overlapping windows nor resembles a day of wear.</p>
+<ol>
+  <li><b>Event counting</b> (<code>reports/alarms</code>): fired windows merged with a 30 s refractory period. About 40% of the old <code>lodo-pooled</code> replay number was the same alarm counted repeatedly (44.8 &rarr; 25.4 events/h).
+      A first daily estimate from assumed activity time budgets gave 26 (<code>val-slice</code>) and 155 (<code>lodo-pooled</code>) alarms/day. This was scenario arithmetic, not measurement.</li>
+  <li><b>Measured on Capture-24</b> (<code>reports/freeliving</code>, 140 people, 5 seeds): <b>71</b> alarms/day (<code>val-slice</code>, 95% CI 63&ndash;79) and <b>193</b> (<code>lodo-pooled</code>, 177&ndash;210); every person had at least one alarm per day.
+      Free-living walking fires about 8 events/h against 1&ndash;3 in lab clips; sleep is quiet (0.18 events/h). The assumed budget had underestimated the current rule by about 2.7×.</li>
+  <li><b>Mounting check:</b> rolling the forearm axis by ±30&ndash;60° or assuming the other wrist moved the rate only mildly (70 &rarr; 73&ndash;81 for <code>val-slice</code>), so the numbers do not hinge on my alignment assumption, though 90&ndash;180° rolls raise them to 89&ndash;99.</li>
+</ol>
+
+<h3>4.7 Real everyday data as training negatives (<code>reports/negatives</code>, <code>freeliving_c24random</code>)</h3>
+<p>Capture-24 people P001&ndash;P100 supply negatives; P101&ndash;P151 are held out and never trained on. Leave-one-fall-dataset-out, 3 seeds, accel-only augmented.
+<b>Sensitivity at a fixed alarm budget</b> is threshold-free: the share of held-out fall windows detected at the lowest threshold that keeps free-living alarms within the budget.</p>
+<div class="tablewrap"><table>
+<thead><tr><th>Training negatives</th><th class="n">Alarms/day at usual threshold</th><th class="n">Sens. @10/day</th><th class="n">Sens. @50/day</th><th class="n">Alarms/day at 95% sens.</th><th class="n">Lab AUPRC</th></tr></thead>
+<tbody>
+<tr><td>none (control)</td><td class="n">93 ± 31</td><td class="n">0.36</td><td class="n">0.75</td><td class="n">210</td><td class="n">0.939</td></tr>
+<tr><td>random Capture-24 windows</td><td class="n good">39 ± 15</td><td class="n good">0.60</td><td class="n good">0.89</td><td class="n good">99</td><td class="n good">0.957</td></tr>
+<tr><td>random + mined hard negatives</td><td class="n">17 ± 7</td><td class="n">0.72</td><td class="n">0.90</td><td class="n bad">410 ± 280</td><td class="n">0.937</td></tr>
+</tbody></table></div>
+<p>Random negatives win 3/3 seeds on every free-living metric and do not hurt lab data. Mining is best at very low alarm budgets but loses lab sensitivity (&minus;0.08) and gives erratic alarms at 95% sensitivity;
+my reading is that the hardest everyday windows look like falls, so training against them pushes some true falls down (not verified).</p>
+
+<h3>4.8 Final models with random negatives, threshold rules compared (<code>reports/freeliving_c24random</code>)</h3>
+<p>Final models trained on all four fall datasets plus Capture-24 negatives, scored on the same 48 held-out people (1,226 h) as the models trained without. 3 seeds.</p>
+<div class="bars">
+  <div class="note">Alarm events per 24 h of wear, <code>val-slice</code> rule</div>
+  <div class="bar"><span>Assumed time budget (lab clips)</span><span class="track"><span class="fill alt" style="display:block;width:12%"></span></span><span class="v">26</span></div>
+  <div class="bar"><span>Measured, no negatives</span><span class="track"><span class="fill lose" style="display:block;width:35%"></span></span><span class="v">76</span></div>
+  <div class="bar"><span>Measured, with Capture-24 negatives</span><span class="track"><span class="fill win" style="display:block;width:17%"></span></span><span class="v">36</span></div>
+  <div class="note" style="margin-top:.6rem">Alarm events per 24 h of wear, <code>lodo-pooled</code> rule (≈ 0.95 fall sensitivity)</div>
+  <div class="bar"><span>Assumed time budget (lab clips)</span><span class="track"><span class="fill alt" style="display:block;width:71%"></span></span><span class="v">155</span></div>
+  <div class="bar"><span>Measured, no negatives</span><span class="track"><span class="fill lose" style="display:block;width:100%"></span></span><span class="v">217</span></div>
+  <div class="bar"><span>Measured, with Capture-24 negatives</span><span class="track"><span class="fill win" style="display:block;width:53%"></span></span><span class="v">114</span></div>
+</div>
+<div class="tablewrap"><table>
+<thead><tr><th>Model</th><th>Rule</th><th class="n">Alarms/day (95% CI over people)</th><th class="n">Median / p90 person</th><th class="n">Fall-window sensitivity</th></tr></thead>
+<tbody>
+<tr><td>without negatives</td><td><code>val-slice</code></td><td class="n">76 (64&ndash;88)</td><td class="n">68 / 140</td><td class="n">0.79 ± 0.10</td></tr>
+<tr><td>with negatives</td><td><code>val-slice</code></td><td class="n good">36 (30&ndash;42)</td><td class="n">31 / 70</td><td class="n">0.85 ± 0.03</td></tr>
+<tr><td>without negatives</td><td><code>lodo-pooled</code></td><td class="n">217 (191&ndash;245)</td><td class="n">205 / 340</td><td class="n">0.95</td></tr>
+<tr><td>with negatives</td><td><code>lodo-pooled</code></td><td class="n good">114 (99&ndash;130)</td><td class="n">103 / 196</td><td class="n">0.95</td></tr>
+</tbody></table></div>
+<p>At the same ~0.87 fall sensitivity the model with negatives needs about 38 alarms/day against about 110 without. The best low-alarm point reached is about 11 alarms/day at 0.67 sensitivity (threshold 0.999).
+Remaining alarms (events/h, <code>val-slice</code>): walking 3.7, household chores 3.3, manual work 4.7, sports 19, sitting 0.65, sleep 0.10.
+The confidence intervals cover only sampling of people; seed-to-seed spread is larger (for example 26&ndash;53 alarms/day for the negatives model).</p>
+
+<h3>4.9 More negatives per person (<code>reports/negatives/scale_report.md</code>)</h3>
+<p>Same setup as 4.7 (3 seeds, same held-out people), but 5,000 and 15,000 random Capture-24 windows per training person instead of 1,500 (up to 1.1 million windows; about 47,000 exist per person).</p>
+<div class="tablewrap"><table>
+<thead><tr><th>Windows per person</th><th class="n">Alarms/day, usual threshold</th><th class="n">Alarms/day at 95% sens.</th><th class="n">Sens. @25/day</th><th class="n">Sens. @50/day</th><th class="n">Lab AUPRC</th></tr></thead>
+<tbody>
+<tr><td>0</td><td class="n">93</td><td class="n">210</td><td class="n">0.60</td><td class="n">0.75</td><td class="n">0.939</td></tr>
+<tr><td>1,500</td><td class="n">39</td><td class="n good">99</td><td class="n good">0.80</td><td class="n good">0.89</td><td class="n good">0.957</td></tr>
+<tr><td>5,000</td><td class="n">37</td><td class="n">108</td><td class="n">0.79</td><td class="n">0.89</td><td class="n">0.949</td></tr>
+<tr><td>15,000</td><td class="n">44</td><td class="n">114</td><td class="n">0.78</td><td class="n">0.88</td><td class="n">0.944</td></tr>
+</tbody></table></div>
+<p><b>Plateau at 1,500.</b> Neighbouring windows of one person are near-duplicates, so volume adds little; 15,000 is slightly worse on most metrics (within seed noise, so read it as no gain, not harm).
+More <em>people</em> or conditions, not more windows, is the lever left. A dilution of the fall class weight is a possible cause of the small drop (not tested).</p>
+
+<h3>4.10 Second-stage confirmation (<code>reports/stage2/report.md</code>)</h3>
+<p><b>Design.</b> Stage 1 is the Capture-24-negatives CNN. Candidates are |a| peaks of at least 2 g. Stage 2 is a gradient-boosted classifier on rotation-invariant context features
+(motion before and after, stillness, posture change, repeat impacts) from 1 s before to 4 s after the candidate, so <b>an alarm is delayed by 4 s</b>. It trains on lab fall recordings against lab ADL candidates and
+Capture-24 candidates (people P001&ndash;P100). An alarm needs both stages. Leave-one-fall-dataset-out, 3 seeds, scored on the 48 held-out Capture-24 people (1,226 h).
+Sensitivity here is <b>per fall recording</b> (not comparable with the per-window figures above); recordings without the full context (about 5% of WEDA-FALL and UP-Fall) are excluded.</p>
+<div class="tablewrap"><table>
+<thead><tr><th>Practical operating point (no held-out data used for thresholds)</th><th class="n">Alarms / 24 h</th><th class="n">Fall-recording sensitivity</th></tr></thead>
+<tbody>
+<tr><td>Stage 1 alone (validation-slice threshold)</td><td class="n">35.4 ± 14.4</td><td class="n">0.893</td></tr>
+<tr><td>Stage 1 + trigger (|a| &ge; 2 g)</td><td class="n">33.1 ± 12.4</td><td class="n">0.889</td></tr>
+<tr><td>Two-stage (stage 2 keeps 98% of validation falls)</td><td class="n good">16.9 ± 6.7</td><td class="n mid">0.845</td></tr>
+</tbody></table></div>
+<div class="tablewrap"><table>
+<thead><tr><th>Best case, thresholds picked on held-out data</th><th class="n">Stage 1 alone</th><th class="n">Stage 2 alone</th><th class="n">Both</th></tr></thead>
+<tbody>
+<tr><td>Alarms/day at sensitivity 0.90</td><td class="n">35.8</td><td class="n">52.0</td><td class="n good">21.9</td></tr>
+<tr><td>Alarms/day at sensitivity 0.95</td><td class="n">77.7</td><td class="n">147</td><td class="n good">49.8</td></tr>
+<tr><td>Sensitivity within 10 alarms/day</td><td class="n">0.29</td><td class="n">0.74</td><td class="n good">0.83</td></tr>
+<tr><td>Sensitivity within 25 alarms/day</td><td class="n">0.79</td><td class="n">0.84</td><td class="n good">0.91</td></tr>
+</tbody></table></div>
+<p class="note">The &ldquo;both&rdquo; column searches two thresholds, so it is an upper bound on the combination; the practical table is the fair comparison.</p>
+<ul>
+  <li><b>The stages complement each other.</b> Stage 2 alone is worse than stage 1 on Erciyes (ADL such as sitting down is also followed by stillness) but better on UMAFall and WEDA-FALL.</li>
+  <li><b>Remaining alarms</b> (events/h, stage 1 + trigger &rarr; two-stage): sports 16.5 &rarr; 6.8, manual work 4.3 &rarr; 2.1, household chores 3.0 &rarr; 1.8, walking 3.5 &rarr; 1.8, sitting 0.64 &rarr; 0.35, sleep 0.10 &rarr; 0.06.</li>
+  <li><b>Threshold transfer returns for stage 2:</b> the validation cut-off loses more falls on held-out Erciyes (0.90 &rarr; 0.78) than the 2% it was set for.</li>
+  <li><b>Main risk.</b> Simulated falls end with the volunteer lying still until the recording stops (median post-impact motion 0.01&ndash;0.06 g against 0.3&ndash;0.85 g for ADL candidates in most datasets).
+      Real falls followed by moving or getting up could be rejected, so real-fall sensitivity may be lower than shown; this cannot be measured without real falls.</li>
+</ul>
+
+<h2>5. What the data does not tell us</h2>
+<div class="callout">
+  <ul>
+    <li><b>Simulated falls only.</b> No public wrist dataset has real falls. Published results on real falls are far worse; read every sensitivity as an upper bound. Per-window sensitivity is not per-fall detection.</li>
+    <li><b>Capture-24 is a research accelerometer</b> (AX3, ±8 g) worn by 151 Oxford adults for about a day each, on the dominant wrist (assumed right). A smartwatch population will differ; a real fall that happened in it would count as a false alarm.</li>
+    <li><b>Assumptions in the data pipeline:</b> UMAFall's wrist side (taken from the research report), the magnitude-peak impact fallback for Erciyes and UMAFall, per-person mounting alignment (forearm roll weakly constrained), UP-Fall activity codes in the activity mapping (from the dataset's published list, not the files).</li>
+    <li><b>Run-to-run noise.</b> Training is not bit-reproducible; single folds can differ by up to about 2× between runs with the same seed. Most conclusions rest on 3&ndash;8 seeds and paired comparisons.</li>
+    <li><b>The false-alarm target is my assumption</b> (a few per week). It has not been checked against vendor specifications or regulators.</li>
+    <li><b>Second stage relies on post-impact stillness</b>, which in the simulated falls may reflect the recording protocol rather than real falls (see 4.10).</li>
+  </ul>
+</div>
+
+<h2>6. What is next (recommended order)</h2>
+<ol>
+  <li><b>Test whether stage 2 survives falls with recovery</b> (no new data). Break stage-2 sensitivity down by fall type: Erciyes has recovery falls (types 905, 906, 914, 916) and WEDA/UP-Fall have different fall types; LAFAN1 &ldquo;fall and get up&rdquo; gives mocap examples. If these are rejected, the stillness cue is an artefact.</li>
+  <li><b>Measure the stillness ceiling on Capture-24</b> (cheap): how many candidate impacts are followed by &ge; 4, 10, 30, 60 s of stillness? This bounds how far a longer confirmation window (a &ldquo;did the wearer stay down?&rdquo; check) could cut alarms, at the price of a longer delay.</li>
+  <li><b>Improve stage 2 where it is cheap to iterate:</b> mine hard negatives for the gradient-boosted model (safer than for the CNN), add posture features (does the arm return to a hanging pose), richer sampling of Capture-24 candidates (it used 600 per person), and a stage-2 threshold rule that transfers.</li>
+  <li><b>More people and conditions, not more windows:</b> other free-living wrist cohorts (for example IMU50, 50 people &times; 5 days, 46.7 GB, not evaluated) and a smartwatch recording, for both stage-1 negatives and stage-2 evaluation.</li>
+  <li><b>Collect target-watch data (needed to settle the question):</b> scripted falls <em>with and without recovery</em> plus multi-day wear, then per-device fine-tuning with &ge; 4 volunteers (4.4) and per-user threshold calibration.</li>
+  <li><b>Product-level confirmation:</b> a user prompt that cancels on movement, and on Apple and Samsung the OS fall event as a second opinion (the research report found the event exposed for both; not for Huawei or Garmin).</li>
+  <li><b>Also pending:</b> deployment feasibility (Core ML or TFLite, latency, vendor sample rates against 25 Hz), a per-fall metric across the board, first commit and push, and moving the loose <code>varsayımlar</code> notes.</li>
+</ol>
+
+<h2>7. Reproduce and where things are</h2>
+<pre><code>uv sync
+uv run falldet prepare                      # raw datasets -> canonical windows
+uv run falldet baseline --seeds 3 [--augment]
+uv run falldet compare reports/baseline reports/baseline_augmented
+uv run falldet finetune --seeds 5 [--augment]
+uv run falldet threshold --seeds 5 [--augment]
+uv run falldet ablate --seeds 5 --channels acc|imu
+uv run falldet synth &amp;&amp; uv run falldet synthetic --seeds 8 --channels acc|imu
+uv run falldet alarms --seeds 5             # event counting + assumed-budget estimate
+uv run falldet freeliving --seeds 5         # measured on Capture-24
+uv run falldet negatives --seed 0|1|2 &amp;&amp; uv run falldet negatives --report
+uv run falldet negatives --final 3          # final models with Capture-24 negatives
+uv run falldet negatives --scale --seed 0|1|2 &amp;&amp; uv run falldet negatives --scale --report
+uv run falldet stage2 --seed 0|1|2 &amp;&amp; uv run falldet stage2 --report   # second-stage confirmation</code></pre>
+<div class="tablewrap"><table>
+<thead><tr><th>Path</th><th>Contents</th></tr></thead>
+<tbody>
+<tr><td><code>src/falldet/</code></td><td>canonical format, loaders, windows, model, augmentation, experiments (one module each)</td></tr>
+<tr><td><code>reports/</code></td><td>one folder per experiment with <code>report.md</code> and raw <code>metrics.csv</code></td></tr>
+<tr><td><code>docs/research/</code></td><td>vendor SDK and model-training research report and its HTML summary</td></tr>
+<tr><td><code>docs/adr/</code>, <code>GLOSSARY.md</code></td><td>decisions (25 Hz common rate; numpy virtual IMU and its test outcome) and shared vocabulary</td></tr>
+<tr><td><code>AGENTS.md</code></td><td>commands, run times, dataset locations, known limits</td></tr>
+</tbody></table></div>
+
+<footer>
+  Raw datasets are gitignored and not redistributed; LAFAN1 is CC BY-NC-ND and Capture-24 is CC BY 4.0. Research use only at this stage.
+  Generated from the project reports; regenerate the numbers by re-running the commands above.
+</footer>
+</main>
+</body>
+</html>

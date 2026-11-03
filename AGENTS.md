@@ -1,0 +1,34 @@
+## Project
+
+Wrist-IMU fall detection baseline. Environment: `uv sync` (Python 3.14, torch with CUDA). Raw datasets live in `data/raw/` (gitignored, never redistributed): `WEDA-FALL/` (git clone), `erciyes/Tests/` (UCI 455, nested RARs extracted), `upfall/upfall.csv` (UP-Fall "Data Set" from Google Drive; it is a CSV despite the `.zip` name), `UMAFall_Dataset_corrected_version/` (figshare, downloaded by hand), `lafan1/` (LAFAN1 mocap, CC BY-NC-ND, from the `lafan1/lafan1.zip` Git LFS file of github.com/ubisoft/ubisoft-laforge-animation-dataset, unzipped; used only for synthetic data), `capture24/` (Capture-24, CC BY 4.0, free-living wrist accelerometer without falls; `capture24.zip` from ORA `uuid:99d7c092-d865-4a19-b096-cc16440cd001` unzipped to `capture24/capture24/`; used only to measure false alarms). FallAllD needs an IEEE DataPort subscription and is not used; the pipeline skips any dataset that is absent.
+
+- `uv run falldet prepare`: raw data to canonical 25 Hz windows in `data/processed/`.
+- `uv run falldet baseline --seeds 3`: train and evaluate, writes `reports/baseline/report.md` (about 17 min on an RTX 3060, four datasets).
+- `uv run falldet baseline --seeds 3 --augment`: same with train-time augmentation (`augment.py`), writes `reports/baseline_augmented/report.md` (about 26 min); `uv run falldet compare reports/baseline reports/baseline_augmented` writes the paired comparison to `reports/baseline_augmented/comparison.md`.
+- `uv run falldet finetune --seeds 5`: per-device adaptation experiment, writes `reports/finetune/report.md` (about 8 min).
+- `uv run falldet finetune --seeds 5 --augment`: same with augmentation, writes `reports/finetune_augmented/report.md` (about 9 min).
+- `uv run falldet threshold --seeds 5 [--augment]`: compares decision-threshold rules on unseen datasets (nested leave-one-dataset-out, ADL-budget, ...), writes `reports/threshold[_augmented]/report.md` (about 11 / 24 min).
+- `uv run falldet ablate --seeds 5 --channels acc|imu`: per-transform augmentation ablation, writes `reports/ablation_<channels>/report.md` (about 55 min per channel set; the two can run concurrently).
+- `uv run falldet synth`: LAFAN1 mocap to synthetic wrist-IMU windows (`mocap.py` virtual IMU, `synth.py`), writes `data/processed/synthetic_*` (about 25 s). `uv run falldet synthetic --seeds 8 --channels acc|imu`: tests whether adding them to training helps on the real datasets, writes `reports/synthetic_<channels>/report.md` (about 75 / 60 min; a run killed by the 1 h job cap resumes from its saved conditions).
+- `uv run falldet alarms --seeds 5`: event-level false alarms (refractory merge), per-activity rates and a false-alarms-per-day estimate under assumed time budgets (`alarms.py`, `BUDGETS`), writes `reports/alarms/report.md` (about 8 min; saved scores in `reports/alarms/` are reused, delete them to retrain).
+- `uv run falldet freeliving --seeds 5`: measured free-living false alarms on Capture-24 (`freeliving.py`; prepares `data/raw/capture24/` into `data/processed/capture24/`, fits final models, scores every window, adds a mounting-sensitivity check and a threshold trade-off), writes `reports/freeliving/report.md` (about 10 min; every stage is cached under `data/processed/capture24/`, delete `thresholds.csv`, `models/` and `scores/` to refit).
+- `uv run falldet negatives --seed N` (N = 0, 1, 2; run in parallel, about 30 min each), then `uv run falldet negatives --report`: Capture-24 windows as extra training negatives (random vs mined), evaluated on held-out Capture-24 people and leave-one-fall-dataset-out, writes `reports/negatives/report.md` (`negatives.py`; needs `freeliving` prepared first).
+- `uv run falldet negatives --final 3`: final models trained with Capture-24 random negatives; free-living report on the held-out people (`reports/freeliving_c24random/report.md`) and the with/without comparison of threshold rules (`comparison.md`) (about 20 min; cached under `data/processed/capture24/c24random/`).
+- `uv run falldet negatives --scale --seed N` (N = 0, 1, 2; at most two at once, host memory; about 55 min each, resumable per fold), then `uv run falldet negatives --scale --report`: 5,000 and 15,000 random Capture-24 windows per training person against the 1,500 default, writes `reports/negatives/scale_report.md`. Result: no gain beyond 1,500.
+- `uv run falldet stage2 --seed N` (N = 0, 1, 2; run in parallel, about 13 min each; first run builds a feature cache under `data/processed/capture24/stage2/`), then `uv run falldet stage2 --report`: second-stage confirmation (`stage2.py`: candidate impacts, 1 s before to 4 s after, gradient-boosted context features) on top of the Capture-24-negatives CNN, writes `reports/stage2/report.md`. Alarms are delayed by 4 s; sensitivity there is per fall recording.
+- Code: `src/falldet/` (`canonical.py` format, `loaders.py` per-dataset conversion, `windows.py`, `model.py`, `reference.py`, `baseline.py`, `finetune.py`). Decisions: `docs/adr/`. Vocabulary: `GLOSSARY.md`.
+- Known limits: UP-Fall wrist mounting differs per subject (aligned per subject, 5 of 17 excluded). Erciyes and UMAFall are right-wrist data, aligned per subject and mirrored to the left-wrist convention, with forearm roll only weakly constrained; UMAFall's wrist side is not stated in its files (taken from the research report) and subject 16 is excluded. UMAFall's gyroscope saturates at about ±256 deg/s. Erciyes and UMAFall have no fall annotations, so their impact moments use the magnitude-peak fallback. Synthetic falls are detected from the LAFAN1 skeleton (upright to lying within 2 s, 99 events, 5 subjects), not annotated.
+
+## Agent skills
+
+### Issue tracker
+
+Issues live in GitHub Issues at Nephritus/fall-detection (private), via the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Default vocabulary: needs-triage, needs-info, ready-for-agent, ready-for-human, wontfix. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: `GLOSSARY.md` and `docs/adr/` at the repo root. See `docs/agents/domain.md`.
