@@ -43,12 +43,16 @@ The axis convention of the canonical format: x along the forearm toward the fing
 _Avoid_: Sensor frame, device axes, body frame
 
 **Mounting alignment**:
-Rotating one wearer's signal into the wrist frame, using the average gravity direction during a reference activity (standing or walking) and mirroring right-wrist data to the left-wrist convention. A wearer whose reference average is too weak to show a direction is excluded rather than guessed.
+Rotating one wearer's signal into the wrist frame, using the average gravity direction during a reference activity (standing or walking) and mirroring right-wrist data to the left-wrist convention. Without activity labels the walking is found from the signal itself (a step rhythm in |a|). A wearer whose reference average is too weak to show a direction is excluded rather than guessed.
 _Avoid_: Calibration, orientation correction
 
 **Free-living recording**:
 Unscripted, continuous wear in daily life (a day or more, sleep included), with no falls marked. Used to measure false alarms and as a source of training ADL.
 _Avoid_: Real-world data, background data, wild data
+
+**Non-wear time**:
+Recorded time when the device was off the wrist, found from the signal (an hour with almost no variation on at least two axes). Excluded from exposure and from detections, as a watch with off-wrist detection would not alert then.
+_Avoid_: Idle time, missing data
 
 ### Detection quality
 

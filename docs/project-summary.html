@@ -82,7 +82,8 @@
     <li><b>Latest:</b> more negatives per person (3&times; and 10&times;) did <em>not</em> help beyond the 1,500-window setting. A second-stage confirmation
         (context 1 s before to 4 s after the impact) <b>halves</b> alarms again, <b>35 &rarr; 17 per day</b>, but it does so by requiring post-impact stillness: it keeps only 0.46 of Erciyes falls with recovery (stage 1: 0.92).
         A <b>stillness check</b> (alert only once the wrist has stayed still for a wait) brings free-living alarms to <b>0.5 per day after 10 s</b> and <b>0.2 after 60 s</b>, with or without stage 2.
-        What it costs on real falls is unmeasured: lab recordings stop a few seconds after the impact (4.11).</li>
+        What it costs on real falls is unmeasured: lab recordings stop a few seconds after the impact (4.11).
+        On <b>older adults</b> (93 NHANES participants aged 65+, about a week each, another device) the same design gives <b>0.57 per day after 10 s</b> and <b>0.21 after 60 s</b>, close to Capture-24 (4.12).</li>
     <li><b>Did not help:</b> synthetic mocap data, hard-negative mining on lab data, gyroscope channels, per-device fine-tuning with fewer than ~4 volunteers, more Capture-24 windows per person.</li>
   </ul>
 </div>
@@ -296,11 +297,29 @@ Applied to stage 1 with Capture-24 negatives and to the two-stage system; same 4
   <li><b>What is left</b> after 60 s is mostly sleep and unlabelled time: a hard movement, then lying still, which the wrist cannot tell apart from lying on the floor.</li>
 </ul>
 
+<h3>4.12 Older adults, another device (<code>reports/nhanes/report.md</code>)</h3>
+<p><b>Design.</b> 100 randomly drawn NHANES 2013&ndash;14 participants aged 65+ (public CDC data), ActiGraph GT3X+ on the non-dominant wrist, about 8 days each around the clock; 93 usable (7 excluded for too little walking-like signal or a weak walking direction), 16,689 h worn.
+No model trained on them, on this device or on this age group. Non-wear time (GGIR rule) is excluded, as a watch knows when it is off the wrist. There are no activity labels, so the mounting comes from detected walking plus the pooled resting poses of all participants;
+checked on Capture-24 seen through random device rotations, that gave 28.6 alarms/day against 29.7 with labels.</p>
+<div class="tablewrap"><table>
+<thead><tr><th>Stage 1 + stillness check</th><th class="n">NHANES 65+, alarms/day</th><th class="n">per week</th><th class="n">Capture-24, alarms/day</th></tr></thead>
+<tbody>
+<tr><td>no check</td><td class="n">15.1</td><td class="n">106</td><td class="n">35.1</td></tr>
+<tr><td>10 s still</td><td class="n good">0.57</td><td class="n">4.0</td><td class="n good">0.54</td></tr>
+<tr><td>60 s still</td><td class="n good">0.21</td><td class="n">1.5</td><td class="n good">0.18</td></tr>
+</tbody></table></div>
+<ul>
+  <li><b>The checked rate transfers.</b> Older people trigger the CNN less than half as often (22.8/day at 65&ndash;69 down to 7.2 at 80+; presumably fewer vigorous movements), but what survives a stillness check is about the same rate.</li>
+  <li><b>Per person (10 s):</b> median 0.30 per day, 90th percentile 1.65, worst 5.0; 18% had no alarm all week (35% with 60 s).</li>
+  <li><b>Uncertain mounting does not drive it:</b> 10 people whose own walking direction was far (&gt; 80&deg;) from the pooled one; without them 0.48 and 0.18 per day.</li>
+  <li><b>Not measured:</b> falls. NHANES has no fall labels, so a real fall that week would count as a false alarm. The 7 excluded people had too little walking-like signal or a weak walking direction, so the least mobile may be under-represented [inference].</li>
+</ul>
+
 <h2>5. What the data does not tell us</h2>
 <div class="callout">
   <ul>
     <li><b>Simulated falls only.</b> No public wrist dataset has real falls. Published results on real falls are far worse; read every sensitivity as an upper bound. Per-window sensitivity is not per-fall detection.</li>
-    <li><b>Capture-24 is a research accelerometer</b> (AX3, ±8 g) worn by 151 Oxford adults for about a day each, on the dominant wrist (assumed right). A smartwatch population will differ; a real fall that happened in it would count as a false alarm.</li>
+    <li><b>Free-living wear comes from research accelerometers</b>: Capture-24 (AX3, ±8 g, 151 Oxford adults, about a day each, dominant wrist assumed right) and NHANES (GT3X+, 93 US adults aged 65+, about a week each, non-dominant wrist assumed left). A smartwatch population will differ; a real fall that happened in them would count as a false alarm.</li>
     <li><b>Assumptions in the data pipeline:</b> UMAFall's wrist side (taken from the research report), the magnitude-peak impact fallback for Erciyes and UMAFall, per-person mounting alignment (forearm roll weakly constrained), UP-Fall activity codes in the activity mapping (from the dataset's published list, not the files).</li>
     <li><b>Run-to-run noise.</b> Training is not bit-reproducible; single folds can differ by up to about 2× between runs with the same seed. Most conclusions rest on 3&ndash;8 seeds and paired comparisons.</li>
     <li><b>The false-alarm target is my assumption</b> (a few per week). It has not been checked against vendor specifications or regulators.</li>
@@ -313,7 +332,7 @@ Applied to stage 1 with Capture-24 negatives and to the two-stage system; same 4
   <li><b>Record falls that continue after the impact</b> (needed before shipping a stillness check): at least a minute after each fall, with and without getting up, on the target watch, plus its noise floor at rest. This is the only way to price the 10&ndash;60 s check of 4.11.</li>
   <li><b>Decide the alert flow:</b> with a stillness check, stage 2 no longer lowers alarms (4.11) but still loses recovery falls, so the candidate design is stage 1 &rarr; stillness check &rarr; prompt with countdown; keep stage 2 only if it is shown to help on real falls.</li>
   <li><b>Improve stage 2 only if it is kept:</b> mine hard negatives for the gradient-boosted model, add posture features (does the arm return to a hanging pose), richer sampling of Capture-24 candidates (it used 600 per person), and a stage-2 threshold rule that transfers.</li>
-  <li><b>More people and conditions, not more windows:</b> other free-living wrist cohorts (for example IMU50, 50 people &times; 5 days, 46.7 GB, not evaluated) and a smartwatch recording, for both stage-1 negatives and stage-2 evaluation.</li>
+  <li><b>More people and conditions, not more windows:</b> NHANES gives older adults (4.12); a consumer-smartwatch recording is still missing (BIDSleep has Apple Watch nights only), and PAAWS has both wrists with video labels (see <code>docs/research/datasets-for-current-design.md</code>).</li>
   <li><b>Collect target-watch data (needed to settle the question):</b> scripted falls <em>with and without recovery</em> plus multi-day wear, then per-device fine-tuning with &ge; 4 volunteers (4.4) and per-user threshold calibration.</li>
   <li><b>Product-level confirmation:</b> a user prompt that cancels on movement, and on Apple and Samsung the OS fall event as a second opinion (the research report found the event exposed for both; not for Huawei or Garmin).</li>
   <li><b>Also pending:</b> deployment feasibility (Core ML or TFLite, latency, vendor sample rates against 25 Hz), a per-fall metric across the board, and moving the loose <code>varsayımlar</code> notes.</li>
@@ -334,7 +353,8 @@ uv run falldet negatives --seed 0|1|2 &amp;&amp; uv run falldet negatives --repo
 uv run falldet negatives --final 3          # final models with Capture-24 negatives
 uv run falldet negatives --scale --seed 0|1|2 &amp;&amp; uv run falldet negatives --scale --report
 uv run falldet stage2 --seed 0|1|2 &amp;&amp; uv run falldet stage2 --report   # second-stage confirmation
-uv run falldet stillness                    # stillness check after alarms</code></pre>
+uv run falldet stillness                    # stillness check after alarms
+uv run falldet nhanes --people 100          # older adults, NHANES raw wrist data (16 GB download)</code></pre>
 <div class="tablewrap"><table>
 <thead><tr><th>Path</th><th>Contents</th></tr></thead>
 <tbody>

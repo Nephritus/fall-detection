@@ -101,11 +101,18 @@ def main() -> None:
     s2.add_argument("--report", action="store_true")
     sub.add_parser("stillness", help="stillness check after alarms (needs stage2 and negatives --final), writes reports/stillness/")
     sub.add_parser("showcase", help="one-page showcase of the detector from the stored results, writes docs/showcase.html")
+    nh = sub.add_parser("nhanes", help="false alarms in older adults (NHANES 2013-14 raw wrist data), writes reports/nhanes/")
+    nh.add_argument("--people", type=int, default=100)
+    nh.add_argument("--seeds", type=int, default=3)
     args = ap.parse_args()
     if args.cmd == "prepare":
         prepare()
     elif args.cmd == "synth":
         synth()
+    elif args.cmd == "nhanes":
+        from .nhanes import run as nhanes
+
+        nhanes(args.seeds, args.people)
     elif args.cmd == "showcase":
         from .showcase import run as showcase
 
