@@ -36,6 +36,12 @@ def test_unsorted_input_is_handled():
     assert fa.events(0.5).tolist() == [2]
 
 
+def test_detections_are_the_sorted_firing_times_per_wearer():
+    fa = FalseAlarms([np.array([50.0, 10, 30]), np.array([5.0])], [np.array([0.9, 0.9, 0.1]), np.array([0.2])], [1.0, 1.0])
+    d = fa.detections(0.5)
+    assert [x.tolist() for x in d] == [[10.0, 50.0], []]
+
+
 def test_window_scores_use_window_ends_and_stride_exposure():
     scores = np.zeros(100)
     scores[[10, 11, 12]] = 1.0  # consecutive windows, 2 s apart: one event

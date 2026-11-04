@@ -99,11 +99,16 @@ def main() -> None:
     s2 = sub.add_parser("stage2", help="second-stage confirmation, writes reports/stage2/")
     s2.add_argument("--seed", type=int, default=None, help="run one seed (run several in parallel), then --report")
     s2.add_argument("--report", action="store_true")
+    sub.add_parser("stillness", help="stillness check after alarms (needs stage2 and negatives --final), writes reports/stillness/")
     args = ap.parse_args()
     if args.cmd == "prepare":
         prepare()
     elif args.cmd == "synth":
         synth()
+    elif args.cmd == "stillness":
+        from .stillness import run as stillness
+
+        stillness()
     elif args.cmd == "stage2":
         from . import stage2
 

@@ -80,8 +80,9 @@
         <b>112 per day</b> at the threshold that catches 95% of simulated falls. A usable product needs a few per week
         [my assumption, not checked against vendor specs].</li>
     <li><b>Latest:</b> more negatives per person (3&times; and 10&times;) did <em>not</em> help beyond the 1,500-window setting. A second-stage confirmation
-        (context 1 s before to 4 s after the impact) <b>halves</b> alarms again, <b>35 &rarr; 17 per day</b>, for about 5 points of per-recording fall sensitivity (0.89 &rarr; 0.85).
-        Still more than an order of magnitude from the target, and its stillness cue may be an artefact of how falls were recorded.</li>
+        (context 1 s before to 4 s after the impact) <b>halves</b> alarms again, <b>35 &rarr; 17 per day</b>, but it does so by requiring post-impact stillness: it keeps only 0.46 of Erciyes falls with recovery (stage 1: 0.92).
+        A <b>stillness check</b> (alert only once the wrist has stayed still for a wait) brings free-living alarms to <b>0.5 per day after 10 s</b> and <b>0.2 after 60 s</b>, with or without stage 2.
+        What it costs on real falls is unmeasured: lab recordings stop a few seconds after the impact (4.11).</li>
     <li><b>Did not help:</b> synthetic mocap data, hard-negative mining on lab data, gyroscope channels, per-device fine-tuning with fewer than ~4 volunteers, more Capture-24 windows per person.</li>
   </ul>
 </div>
@@ -274,6 +275,27 @@ Sensitivity here is <b>per fall recording</b> (not comparable with the per-windo
       Real falls followed by moving or getting up could be rejected, so real-fall sensitivity may be lower than shown; this cannot be measured without real falls.</li>
 </ul>
 
+<h3>4.11 Stillness check (<code>reports/stillness/report.md</code>)</h3>
+<p><b>Design.</b> An alert is raised only if the wrist stays still for a wait after the detector&rsquo;s decision, as Apple does before calling emergency services (about a minute of immobility, then a 30 s countdown).
+Motion is the per-second standard deviation of the acceleration vector, so a calibration offset is not motion but a rotating wrist is; &ldquo;still&rdquo; here means every second below 0.02 g.
+Applied to stage 1 with Capture-24 negatives and to the two-stage system; same 48 held-out Capture-24 people, 3 seeds. Every alert comes <b>wait seconds later</b>.</p>
+<div class="tablewrap"><table>
+<thead><tr><th>Wait after decision</th><th class="n">Stage 1, alarms/day</th><th class="n">Two-stage, alarms/day</th><th class="n">Two-stage, per week</th></tr></thead>
+<tbody>
+<tr><td>none</td><td class="n">35.1</td><td class="n">16.9</td><td class="n">119</td></tr>
+<tr><td>2 s</td><td class="n">1.41</td><td class="n">1.26</td><td class="n">8.8</td></tr>
+<tr><td>10 s</td><td class="n good">0.54</td><td class="n good">0.51</td><td class="n">3.6</td></tr>
+<tr><td>60 s</td><td class="n good">0.18</td><td class="n good">0.20</td><td class="n">1.4</td></tr>
+</tbody></table></div>
+<ul>
+  <li><b>Within reach of the target on the free-living side.</b> After 10 s, 62% of people have no alarm in their whole recording; the worst person still has about 4 per day.</li>
+  <li><b>Stage 2 stops mattering.</b> With the check, stage 1 alone is as good as two-stage, while stage 2 keeps only 0.46 of Erciyes falls with recovery (stage 1: 0.92).</li>
+  <li><b>Cost on falls is not measurable here.</b> Lab recordings end a median 3&ndash;8 s after impact + 4 s, so only waits up to about 5 s can be checked.
+      For falls without recovery on a low-noise sensor (Erciyes), 0.92 of detected falls pass a 5 s check; for Erciyes falls with recovery, 0.20&ndash;0.23.</li>
+  <li><b>&ldquo;Still&rdquo; depends on the device.</b> Resting motion is about 0.005 g on Erciyes, UP-Fall and Capture-24 but 0.03 g on UMAFall and 0.05 g on WEDA-FALL, where only 0.12&ndash;0.14 of detected falls pass even a 2 s, 0.02 g check. The level must be set on the target watch.</li>
+  <li><b>What is left</b> after 60 s is mostly sleep and unlabelled time: a hard movement, then lying still, which the wrist cannot tell apart from lying on the floor.</li>
+</ul>
+
 <h2>5. What the data does not tell us</h2>
 <div class="callout">
   <ul>
@@ -282,19 +304,19 @@ Sensitivity here is <b>per fall recording</b> (not comparable with the per-windo
     <li><b>Assumptions in the data pipeline:</b> UMAFall's wrist side (taken from the research report), the magnitude-peak impact fallback for Erciyes and UMAFall, per-person mounting alignment (forearm roll weakly constrained), UP-Fall activity codes in the activity mapping (from the dataset's published list, not the files).</li>
     <li><b>Run-to-run noise.</b> Training is not bit-reproducible; single folds can differ by up to about 2× between runs with the same seed. Most conclusions rest on 3&ndash;8 seeds and paired comparisons.</li>
     <li><b>The false-alarm target is my assumption</b> (a few per week). It has not been checked against vendor specifications or regulators.</li>
-    <li><b>Second stage relies on post-impact stillness</b>, which in the simulated falls may reflect the recording protocol rather than real falls (see 4.10).</li>
+    <li><b>Stage 2 and the stillness check rely on post-impact stillness.</b> The simulated falls mostly end with the volunteer lying still, which may reflect the recording protocol; falls followed by moving or getting up are largely rejected (4.10, 4.11). Sensor noise also differs about 10&times; between devices, so &ldquo;still&rdquo; must be set per watch.</li>
   </ul>
 </div>
 
 <h2>6. What is next (recommended order)</h2>
 <ol>
-  <li><b>Test whether stage 2 survives falls with recovery</b> (no new data). Break stage-2 sensitivity down by fall type: Erciyes has recovery falls (types 905, 906, 914, 916) and WEDA/UP-Fall have different fall types; LAFAN1 &ldquo;fall and get up&rdquo; gives mocap examples. If these are rejected, the stillness cue is an artefact.</li>
-  <li><b>Measure the stillness ceiling on Capture-24</b> (cheap): how many candidate impacts are followed by &ge; 4, 10, 30, 60 s of stillness? This bounds how far a longer confirmation window (a &ldquo;did the wearer stay down?&rdquo; check) could cut alarms, at the price of a longer delay.</li>
-  <li><b>Improve stage 2 where it is cheap to iterate:</b> mine hard negatives for the gradient-boosted model (safer than for the CNN), add posture features (does the arm return to a hanging pose), richer sampling of Capture-24 candidates (it used 600 per person), and a stage-2 threshold rule that transfers.</li>
+  <li><b>Record falls that continue after the impact</b> (needed before shipping a stillness check): at least a minute after each fall, with and without getting up, on the target watch, plus its noise floor at rest. This is the only way to price the 10&ndash;60 s check of 4.11.</li>
+  <li><b>Decide the alert flow:</b> with a stillness check, stage 2 no longer lowers alarms (4.11) but still loses recovery falls, so the candidate design is stage 1 &rarr; stillness check &rarr; prompt with countdown; keep stage 2 only if it is shown to help on real falls.</li>
+  <li><b>Improve stage 2 only if it is kept:</b> mine hard negatives for the gradient-boosted model, add posture features (does the arm return to a hanging pose), richer sampling of Capture-24 candidates (it used 600 per person), and a stage-2 threshold rule that transfers.</li>
   <li><b>More people and conditions, not more windows:</b> other free-living wrist cohorts (for example IMU50, 50 people &times; 5 days, 46.7 GB, not evaluated) and a smartwatch recording, for both stage-1 negatives and stage-2 evaluation.</li>
   <li><b>Collect target-watch data (needed to settle the question):</b> scripted falls <em>with and without recovery</em> plus multi-day wear, then per-device fine-tuning with &ge; 4 volunteers (4.4) and per-user threshold calibration.</li>
   <li><b>Product-level confirmation:</b> a user prompt that cancels on movement, and on Apple and Samsung the OS fall event as a second opinion (the research report found the event exposed for both; not for Huawei or Garmin).</li>
-  <li><b>Also pending:</b> deployment feasibility (Core ML or TFLite, latency, vendor sample rates against 25 Hz), a per-fall metric across the board, first commit and push, and moving the loose <code>varsayımlar</code> notes.</li>
+  <li><b>Also pending:</b> deployment feasibility (Core ML or TFLite, latency, vendor sample rates against 25 Hz), a per-fall metric across the board, and moving the loose <code>varsayımlar</code> notes.</li>
 </ol>
 
 <h2>7. Reproduce and where things are</h2>
@@ -311,7 +333,8 @@ uv run falldet freeliving --seeds 5         # measured on Capture-24
 uv run falldet negatives --seed 0|1|2 &amp;&amp; uv run falldet negatives --report
 uv run falldet negatives --final 3          # final models with Capture-24 negatives
 uv run falldet negatives --scale --seed 0|1|2 &amp;&amp; uv run falldet negatives --scale --report
-uv run falldet stage2 --seed 0|1|2 &amp;&amp; uv run falldet stage2 --report   # second-stage confirmation</code></pre>
+uv run falldet stage2 --seed 0|1|2 &amp;&amp; uv run falldet stage2 --report   # second-stage confirmation
+uv run falldet stillness                    # stillness check after alarms</code></pre>
 <div class="tablewrap"><table>
 <thead><tr><th>Path</th><th>Contents</th></tr></thead>
 <tbody>

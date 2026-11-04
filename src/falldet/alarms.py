@@ -100,6 +100,10 @@ class FalseAlarms:
     def n_wearers(self) -> int:
         return len(self._t)
 
+    def detections(self, threshold: float) -> list[np.ndarray]:
+        """Alarm times of the detections that fire, sorted, per wearer (before merging into events)."""
+        return [t[s >= threshold] for t, s in zip(self._t, self._s)]
+
     def events(self, threshold: float) -> np.ndarray:
         """Alarm events per wearer."""
         return np.array([len(_merge(t[s >= threshold], self.refractory)) for t, s in zip(self._t, self._s)])

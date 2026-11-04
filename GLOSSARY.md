@@ -60,6 +60,10 @@ _Avoid_: Trigger, detection (for the merged alert)
 The time after an alarm event during which further detections are not shown as new alarms.
 _Avoid_: Cooldown, debounce
 
+**Stillness check**:
+Holding a detection until the wrist has stayed still for a wait period after the detector's decision; only detections that pass become alarm events. It delays the alert by the wait and misses falls after which the wearer moves.
+_Avoid_: Immobility timer, post-fall confirmation (stage 2 is the confirmation)
+
 **False alarm**:
 An alarm event while the wearer did not fall. Rates are stated per day of exposure.
 _Avoid_: False positive (in user-facing discussion); counting fired windows as false alarms
