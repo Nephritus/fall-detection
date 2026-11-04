@@ -100,11 +100,16 @@ def main() -> None:
     s2.add_argument("--seed", type=int, default=None, help="run one seed (run several in parallel), then --report")
     s2.add_argument("--report", action="store_true")
     sub.add_parser("stillness", help="stillness check after alarms (needs stage2 and negatives --final), writes reports/stillness/")
+    sub.add_parser("showcase", help="one-page showcase of the detector from the stored results, writes docs/showcase.html")
     args = ap.parse_args()
     if args.cmd == "prepare":
         prepare()
     elif args.cmd == "synth":
         synth()
+    elif args.cmd == "showcase":
+        from .showcase import run as showcase
+
+        showcase()
     elif args.cmd == "stillness":
         from .stillness import run as stillness
 
